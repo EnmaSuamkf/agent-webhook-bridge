@@ -1,0 +1,19 @@
+{
+  "name": "agent-webhook-bridge",
+  "version": "0.1.0",
+  "description": "Standalone webhook broker that wakes coding agents (Claude Code, Cursor, Codex) from external HTTP events.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "awb": "./cli/awb.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node broker/daemon.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
+  }
+}
