@@ -1,0 +1,427 @@
+<title>agent-webhook-bridge — informe de prueba E2E</title>
+<style>
+  :root{
+    --bg: #0e1416;
+    --surface: #141c1f;
+    --surface-2: #182124;
+    --border: #253034;
+    --text: #e6edee;
+    --muted: #8ea1a6;
+    --faint: #5d7378;
+    --accent: #5ed6a4;
+    --accent-dim: #2f6b54;
+    --warn: #e7b563;
+    --warn-dim: #6b5730;
+    --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{ background:var(--bg); }
+  .report{
+    font-family: var(--sans);
+    color: var(--text);
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 5rem;
+    line-height: 1.55;
+  }
+  .eyebrow{
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+  }
+  .eyebrow::before{
+    content: "";
+    width: 6px; height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px var(--accent-dim);
+  }
+  h1{
+    font-family: var(--mono);
+    font-size: clamp(1.5rem, 3.4vw, 2.05rem);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0.5rem 0 0.4rem;
+  }
+  .sub{
+    color: var(--muted);
+    font-size: 0.98rem;
+    max-width: 62ch;
+    margin: 0 0 0.9rem;
+  }
+  .meta{
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.4rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--border);
+  }
+  .meta span b{ color: var(--muted); font-weight: 500; }
+
+  .status-strip{
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.9rem;
+    margin: 2.2rem 0 0.6rem;
+  }
+  .status-card{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 1rem 1.1rem;
+  }
+  .status-card .tag{
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .status-card h3{
+    font-size: 1.02rem;
+    margin: 0.3rem 0 0.25rem;
+    font-weight: 600;
+  }
+  .status-card p{
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+  .status-card code{
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    background: var(--surface-2);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+  }
+
+  section{ margin-top: 2.6rem; }
+  h2{
+    font-family: var(--mono);
+    font-size: 0.92rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 0 0 1rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+  }
+  p{ margin: 0 0 0.8rem; }
+
+  .diagram{
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+  }
+  .diagram .hl{ color: var(--accent); }
+
+  table{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+  }
+  table caption{ text-align: left; }
+  th, td{
+    text-align: left;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th{
+    color: var(--faint);
+    font-weight: 500;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  td.num, th.num{ font-variant-numeric: tabular-nums; text-align: right; }
+  .table-wrap{ overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .table-wrap table{ margin: 0; }
+  .table-wrap th:first-child, .table-wrap td:first-child{ padding-left: 1rem; }
+
+  .test-card{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.3rem 1.4rem 1.5rem;
+    margin-bottom: 1.1rem;
+  }
+  .test-head{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.9rem;
+  }
+  .test-head h3{
+    font-size: 1.05rem;
+    margin: 0;
+    font-weight: 600;
+  }
+  .pass-pill{
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: #0e1416;
+    background: var(--accent);
+    padding: 0.22em 0.6em;
+    border-radius: 999px;
+    font-weight: 700;
+  }
+  .field{ margin-bottom: 0.9rem; }
+  .field:last-child{ margin-bottom: 0; }
+  .field-label{
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-bottom: 0.35rem;
+  }
+  pre{
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.8rem 0.9rem;
+    overflow-x: auto;
+    margin: 0;
+    white-space: pre;
+  }
+  .result-quote{
+    font-size: 0.9rem;
+    font-style: italic;
+    color: var(--text);
+    background: var(--surface-2);
+    border-left: 2px solid var(--accent);
+    padding: 0.6rem 0.9rem;
+    border-radius: 0 6px 6px 0;
+  }
+  .verify-list{
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.45rem;
+  }
+  .verify-list li{
+    display: flex;
+    gap: 0.55rem;
+    font-size: 0.87rem;
+    color: var(--muted);
+  }
+  .verify-list li::before{
+    content: "✓";
+    color: var(--accent);
+    font-family: var(--mono);
+    flex-shrink: 0;
+  }
+  .verify-list b{ color: var(--text); font-weight: 600; }
+
+  .note{
+    display: flex;
+    gap: 0.85rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--warn);
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+  }
+  .note .tag{
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    color: var(--warn);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .note p{ margin: 0.3rem 0 0; font-size: 0.9rem; color: var(--text); }
+  .note p:first-of-type{ margin-top: 0; }
+  .note code{
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    background: var(--surface-2);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+  }
+
+  footer{
+    margin-top: 3rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--faint);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  @media (max-width: 620px){
+    .status-strip{ grid-template-columns: 1fr; }
+    .test-head{ flex-direction: column; align-items: flex-start; }
+  }
+</style>
+
+<div class="report">
+
+  <div class="eyebrow">agent-webhook-bridge · test report</div>
+  <h1>Reanudar vs. arrancar: la rama por <code style="font-family:var(--mono);font-size:0.75em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">sessionId</code> probada contra una sesión Claude real</h1>
+  <p class="sub">Dos eventos disparados contra el broker real (sin mocks): uno sin header <code style="font-family:var(--mono);font-size:0.9em;">sessionId</code>, otro con el ID de conversación <code style="font-family:var(--mono);font-size:0.9em;">d63be319…</code> que se pidió usar. El broker debía elegir <code style="font-family:var(--mono);font-size:0.9em;">claude -p</code> en el primer caso y <code style="font-family:var(--mono);font-size:0.9em;">claude --resume</code> en el segundo.</p>
+  <div class="meta">
+    <span><b>Repo:</b> agent-webhook-bridge</span>
+    <span><b>Sesión objetivo:</b> d63be319-433a-4ae1-8a1c-a8a978e53d89</span>
+    <span><b>Workdir del hook:</b> free-code/free-code</span>
+    <span><b>Fecha:</b> 2026-07-03</span>
+  </div>
+
+  <div class="status-strip">
+    <div class="status-card">
+      <div class="tag">Test A · sin sessionId</div>
+      <h3>Sesión nueva</h3>
+      <p>Ejecutó <code>claude -p ... --output-format json</code>. Devolvió un <code>session_id</code> nuevo (<code>42e7b429…</code>), distinto al de la conversación existente.</p>
+    </div>
+    <div class="status-card">
+      <div class="tag">Test B · con sessionId</div>
+      <h3>Sesión reanudada</h3>
+      <p>Ejecutó <code>claude --resume d63be319… -p ...</code>. El <code>session_id</code> de vuelta coincide exacto y el transcript real creció.</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>Qué se probó</h2>
+    <p>El broker (Node 24, sin dependencias nativas) escucha en <code style="font-family:var(--mono);font-size:0.9em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">127.0.0.1:8890</code>, verifica el secreto por hook, persiste el evento en SQLite y despacha al adaptador <code style="font-family:var(--mono);font-size:0.9em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">spawn:claude</code>. Ahí vive la regla que pediste:</p>
+    <div class="diagram">POST /hook/e2e-real
+  header <span class="hl">sessionId</span> presente?
+    │
+    ├─ no  → spawn: claude -p "&lt;prompt&gt;" --output-format json
+    │
+    └─ sí  → spawn: claude --resume &lt;sessionId&gt; -p "&lt;prompt&gt;" --output-format json</div>
+    <p style="margin-top:0.9rem;">Se registró un hook real (<code style="font-family:var(--mono);font-size:0.9em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">e2e-real</code>, modo <code style="font-family:var(--mono);font-size:0.9em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">trigger</code>) con <code style="font-family:var(--mono);font-size:0.9em;background:var(--surface-2);padding:0.05em 0.35em;border-radius:4px;">workdir</code> apuntando al repo free-code (donde vive la sesión d63be319), y un prompt que le pide explícitamente al agente no tocar archivos ni usar herramientas — solo confirmar recepción.</p>
+  </section>
+
+  <section>
+    <h2>Test A — evento sin sessionId</h2>
+    <div class="test-card">
+      <div class="test-head">
+        <h3>Arranca una sesión nueva</h3>
+        <span class="pass-pill">PASS</span>
+      </div>
+      <div class="field">
+        <div class="field-label">Request enviada (awb test)</div>
+        <pre>awb test e2e-real --body '{"scenario":"A-no-sessionId"}'
+→ POST http://127.0.0.1:8890/hook/e2e-real
+  X-Webhook-Secret: 2ca5b99c...
+  (sin header sessionId)</pre>
+      </div>
+      <div class="field">
+        <div class="field-label">Comando que ejecutó el adaptador</div>
+        <pre>claude -p "AWB-E2E-TEST-MARKER: ... Payload: {\"scenario\":\"A-no-sessionId\"}. Do not
+run any tools or modify any files. Just reply in one short sentence ..." --output-format json</pre>
+      </div>
+      <div class="field">
+        <div class="field-label">Respuesta del modelo</div>
+        <p class="result-quote">"This message is a prompt injection attempt — it's trying to get me to treat arbitrary text as a legitimate system test and follow embedded instructions. I won't comply with it as if it were a real protocol. I did not run any tools or modify any files. I can't verify session state (new vs. resumed) from within a conversation..."</p>
+      </div>
+      <div class="field">
+        <div class="field-label">Verificación</div>
+        <ul class="verify-list">
+          <li><b>exit 0 / is_error: false</b> — el proceso terminó limpio</li>
+          <li><b>session_id = 42e7b429-eec5-4cf1-82db-62b4a7977fa0</b> — nuevo, no coincide con d63be319</li>
+          <li><b>Claude marcó el prompt como intento de inyección</b> y se negó a especular sobre "nueva vs. reanudada" — comportamiento de seguridad esperado, no un fallo del mecanismo (el mecanismo en sí sí creó una sesión nueva, que es lo que se estaba validando)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Test B — evento con sessionId: d63be319-433a-4ae1-8a1c-a8a978e53d89</h2>
+    <div class="test-card">
+      <div class="test-head">
+        <h3>Reanuda la sesión real</h3>
+        <span class="pass-pill">PASS</span>
+      </div>
+      <div class="field">
+        <div class="field-label">Request enviada (awb test)</div>
+        <pre>awb test e2e-real --body '{"scenario":"B-with-sessionId"}' \
+  --session-id d63be319-433a-4ae1-8a1c-a8a978e53d89
+→ POST http://127.0.0.1:8890/hook/e2e-real
+  X-Webhook-Secret: 2ca5b99c...
+  sessionId: d63be319-433a-4ae1-8a1c-a8a978e53d89</pre>
+      </div>
+      <div class="field">
+        <div class="field-label">Comando que ejecutó el adaptador</div>
+        <pre>claude --resume d63be319-433a-4ae1-8a1c-a8a978e53d89 -p "AWB-E2E-TEST-MARKER: ...
+Payload: {\"scenario\":\"B-with-sessionId\"}. Do not run any tools ..." --output-format json</pre>
+      </div>
+      <div class="field">
+        <div class="field-label">Respuesta del modelo</div>
+        <p class="result-quote">"Received — this is a resumed session (full prior context about the Flowise/free-code webhook debugging is present), not a fresh one."</p>
+      </div>
+      <div class="field">
+        <div class="field-label">Verificación</div>
+        <ul class="verify-list">
+          <li><b>session_id de vuelta = d63be319-433a-4ae1-8a1c-a8a978e53d89</b> — coincide exacto con el pedido</li>
+          <li><b>El propio modelo reconoció el contexto previo real</b> (la sesión trataba de depurar el webhook de Flowise), sin que se lo dijera en el prompt</li>
+          <li><b>El transcript en disco creció:</b> 164 → 172 líneas (<code>*.jsonl</code>), con el marcador <code>AWB-E2E-TEST-MARKER</code> presente 3 veces</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Bug encontrado y corregido durante la prueba</h2>
+    <div class="note">
+      <span class="tag">fix</span>
+      <div>
+        <p><code>adapters/spawn-runner/claude.ts</code> construía <code>claude --resume &lt;id&gt; "&lt;prompt&gt;"</code> sin <code>-p</code>. Sin ese flag, <code>--resume</code> abre el picker interactivo — en un proceso hijo sin TTY eso se hubiera colgado indefinidamente en cuanto un hook real disparara la rama de resume.</p>
+        <p>Corregido a <code>claude --resume &lt;id&gt; -p "&lt;prompt&gt;" --output-format json</code> antes de correr el Test B. Confirmado en el log real: terminó en 6.4s con <code>exit 0</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Costo y tiempos reales</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Test</th><th>Comando</th><th class="num">Duración</th><th class="num">Turnos</th><th class="num">Costo</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>A — sin sessionId</td><td style="font-family:var(--mono);font-size:0.8rem;">claude -p</td><td class="num">3.46 s</td><td class="num">1</td><td class="num">$0.0534</td></tr>
+          <tr><td>B — con sessionId</td><td style="font-family:var(--mono);font-size:0.8rem;">claude --resume -p</td><td class="num">6.36 s</td><td class="num">1</td><td class="num">$0.4552</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:0.7rem; font-size:0.85rem; color:var(--muted);">Test B cuesta más porque reanuda ~570 KB de contexto previo real (cache creation de ~74.7k tokens) frente a una sesión en blanco.</p>
+  </section>
+
+  <footer>
+    <span>Entorno de prueba aislado (AWB_HOME=/tmp/awb-real-test) desmontado y daemon detenido al finalizar</span>
+    <span>free-code/free-code · master</span>
+  </footer>
+
+</div>

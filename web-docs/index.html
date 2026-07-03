@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-webhook-bridge — instalación y uso</title>
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.6;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible, button:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 860px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        text-wrap: balance;
+        margin: 0 0 0.6rem;
+      }
+      .tagline{ color: var(--muted); font-size: 1.02rem; max-width: 62ch; margin: 0; }
+
+      nav.toc{
+        margin-top: 1.6rem;
+        padding-top: 1.1rem;
+        border-top: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 1.3rem;
+        font-family: var(--mono);
+        font-size: 0.8rem;
+      }
+      nav.toc a{ color: var(--muted); text-decoration: none; }
+      nav.toc a:hover{ color: var(--accent); }
+
+      section{ margin-top: 2.8rem; scroll-margin-top: 1.5rem; }
+      h2{
+        font-family: var(--mono);
+        font-size: 0.95rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 600;
+        margin: 0 0 1.1rem;
+        padding-bottom: 0.6rem;
+        border-bottom: 1px solid var(--border);
+      }
+      h3{ font-size: 1.02rem; font-weight: 600; margin: 1.4rem 0 0.6rem; }
+      p{ margin: 0 0 0.9rem; }
+      ol, ul{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.35rem; }
+
+      .callout{
+        display: flex;
+        gap: 0.85rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 6px;
+        padding: 1rem 1.2rem;
+        margin: 0 0 1.1rem;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout .tag{
+        font-family: var(--mono);
+        font-size: 0.68rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        white-space: nowrap;
+        color: var(--accent);
+      }
+      .callout.warn .tag{ color: var(--warn); }
+      .callout p{ margin: 0; font-size: 0.92rem; }
+      .callout p + p{ margin-top: 0.5rem; }
+
+      .table-wrap{ overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.1rem; }
+      table{ width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+      th, td{ text-align: left; padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+      tr:last-child td{ border-bottom: none; }
+      th{
+        color: var(--faint);
+        font-weight: 500;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: var(--surface);
+      }
+      td code{ white-space: nowrap; }
+
+      .diagram{
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        line-height: 1.6;
+        color: var(--muted);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        overflow-x: auto;
+        margin-bottom: 1.1rem;
+        white-space: pre;
+      }
+      .diagram .hl{ color: var(--accent); }
+
+      footer{
+        margin-top: 3.5rem;
+        padding-top: 1.2rem;
+        border-top: 1px solid var(--border);
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        color: var(--faint);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">agent-webhook-bridge · docs</div>
+        <h1>Instalación y uso</h1>
+        <p class="tagline">
+          Un broker HTTP standalone que recibe webhooks externos (CI, GitHub, Flowise…) y
+          despierta a Claude Code — como sesión nueva o reanudando una existente — sin que
+          Claude tenga que estar corriendo de antemano.
+        </p>
+        <nav class="toc" aria-label="Contenidos">
+          <a href="#requisitos">Requisitos</a>
+          <a href="#instalacion">Instalación</a>
+          <a href="#arrancar">Arrancar el broker</a>
+          <a href="#hooks">Registrar un hook</a>
+          <a href="#sessionid">Sesión nueva vs. resume</a>
+          <a href="#permisos">Permisos headless</a>
+          <a href="#ejemplos">Ejemplos</a>
+          <a href="#estado">Ver estado</a>
+          <a href="#seguridad">Seguridad</a>
+          <a href="#limitaciones">Limitaciones actuales</a>
+          <a href="#referencia">Referencia de comandos</a>
+        </nav>
+      </header>
+
+      <section id="requisitos">
+        <h2>Requisitos</h2>
+        <ul>
+          <li><strong>Node.js 24 o superior</strong>. El broker usa <code>node:sqlite</code> (sin dependencias nativas) y corre los archivos <code>.ts</code> directamente — no hay paso de build.</li>
+          <li><strong>Claude Code CLI</strong> instalado y autenticado, con el binario <code>claude</code> en el <code>PATH</code> de la máquina donde corre el broker.</li>
+        </ul>
+      </section>
+
+      <section id="instalacion">
+        <h2>Instalación</h2>
+        <p>No hay publicación en npm todavía: se usa directo desde el checkout del repo.</p>
+        <pre><code>cd agent-webhook-bridge
+npm install        # opcional — solo trae @types/node para el editor,
+                    # no hace falta para ejecutar nada</code></pre>
+        <p>Para tener el comando <code>awb</code> disponible en cualquier carpeta:</p>
+        <pre><code>npm link           # crea el symlink global "awb" -&gt; ./cli/awb.ts</code></pre>
+        <p>Si preferís no linkearlo globalmente, cualquier comando <code>awb …</code> de esta guía funciona igual como <code>node cli/awb.ts …</code> ejecutado desde la carpeta del repo.</p>
+      </section>
+
+      <section id="arrancar">
+        <h2>Arrancar el broker</h2>
+        <pre><code>awb start</code></pre>
+        <p>Corre en primer plano y escucha en <code>127.0.0.1:8890</code> por defecto (puerto elegido a propósito para no chocar con el webhook-receiver de free-code, que usa 8787-8806).</p>
+        <div class="callout">
+          <span class="tag">config</span>
+          <div>
+            <p>La configuración (hooks registrados) vive en <code>~/.agent-webhook-bridge/hooks.json</code>, la cola de eventos en <code>~/.agent-webhook-bridge/events.db</code> (SQLite) y los logs de cada invocación de Claude en <code>~/.agent-webhook-bridge/logs/</code>.</p>
+            <p>Para usar otra ubicación (por ejemplo en tests, o para correr varias instancias), seteá <code>AWB_HOME=/ruta/propia</code> antes de cualquier comando <code>awb</code>.</p>
+          </div>
+        </div>
+        <p>El broker relee <code>hooks.json</code> en cada request, así que podés registrar o borrar hooks con <code>awb add</code>/<code>awb rm</code> mientras sigue corriendo, sin reiniciarlo.</p>
+      </section>
+
+      <section id="hooks">
+        <h2>Registrar un hook</h2>
+        <pre><code>awb add ci-failures \
+  --trigger \
+  --workdir /ruta/a/tu/repo \
+  --prompt-template 'Un build falló en CI. Log:\n\n{{payload}}\n\nInvestigá la causa.'</code></pre>
+        <p>La salida devuelve la URL local y el secreto que hay que configurar en el sistema externo:</p>
+        <pre><code>Hook 'ci-failures' [trigger] consumers=spawn:claude
+Local URL:  http://127.0.0.1:8890/hook/ci-failures
+Header:     X-Webhook-Secret: 76171625f1dbab4647623cb7f6c99e18...
+Workdir:    /ruta/a/tu/repo
+Prompt:     Un build falló en CI. Log:\n\n{{payload}}\n\nInvestigá la causa.</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Opción</th><th>Qué hace</th></tr></thead>
+            <tbody>
+              <tr><td><code>--trigger</code> / <code>--queue</code></td><td>Modo de entrega. <code>trigger</code> (default) dispara <code>spawn:claude</code> al llegar el evento. <code>queue</code> solo lo persiste en SQLite, para un futuro adaptador de lectura (ver <a href="#limitaciones">Limitaciones</a>).</td></tr>
+              <tr><td><code>--consumer &lt;c&gt;</code></td><td>Repetible. Default: <code>spawn:claude</code> si es <code>trigger</code>, <code>queue</code> si es <code>queue</code>.</td></tr>
+              <tr><td><code>--prompt-template &lt;texto&gt;</code></td><td>Plantilla del prompt que recibe Claude. <code>{{payload}}</code> se reemplaza por el body del evento (formateado como JSON si no es texto plano); <code>{{hook}}</code> por el nombre del hook.</td></tr>
+              <tr><td><code>--workdir &lt;dir&gt;</code></td><td><code>cwd</code> del proceso <code>claude</code> spawneado. También es la clave que serializa ejecuciones: dos eventos con el mismo <code>workdir</code> nunca corren <code>claude</code> en paralelo sobre el mismo repo.</td></tr>
+              <tr><td><code>--secret &lt;s&gt;</code> / <code>--hmac-secret &lt;s&gt;</code></td><td>Autenticación. Si no das ninguna, se genera un secreto aleatorio. Con <code>--hmac-secret</code> el caller firma el body crudo en vez de mandar el secreto en un header.</td></tr>
+              <tr><td><code>--permission-mode &lt;modo&gt;</code></td><td>Se pasa tal cual como <code>--permission-mode</code> de <code>claude</code> (<code>acceptEdits</code>, <code>auto</code>, <code>bypassPermissions</code>, <code>manual</code>, <code>dontAsk</code>, <code>plan</code>). Sin esto, las corridas headless no pueden escribir ni editar nada (ver <a href="#permisos">Permisos en modo headless</a>).</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>El body del <code>curl</code> es tuyo, no un formato fijo</h3>
+        <p>
+          El bridge no espera ningún campo en particular en el body — ni <code>log</code>, ni
+          <code>branch</code>, ni nada. Vos elegís qué manda tu sistema externo (o qué escribís a
+          mano para probar); el broker se limita a agarrar ese body <em>tal cual llegó</em> y
+          pegarlo entero donde diga <code>{{payload}}</code> en tu <code>--prompt-template</code>.
+          No hay sustitución campo por campo — es un único bloque de texto.
+        </p>
+        <p>Con el hook de arriba, esta request:</p>
+        <pre><code>curl -X POST http://127.0.0.1:8890/hook/ci-failures \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;secreto&gt;" \
+  -d '{"branch":"main","step":"npm test","exitCode":1}'</code></pre>
+        <p>termina armando este prompt exacto, que es lo que <code>claude -p</code> recibe como argumento:</p>
+        <pre><code>Un build falló en CI. Log:
+
+{
+  "branch": "main",
+  "step": "npm test",
+  "exitCode": 1
+}
+
+Investigá la causa.</code></pre>
+        <p>
+          Claude recibe ese JSON como texto plano dentro del prompt y lo interpreta él mismo — no
+          hay ningún parseo especial de <code>branch</code>/<code>step</code>/<code>exitCode</code>
+          del lado del broker. Por eso en distintos ejemplos de esta guía el body tiene forma
+          distinta (<code>{"log": "…"}</code>, <code>{"flow": "…"}</code>, <code>{"branch": "…"}</code>):
+          no es que cada uno siga un formato requerido, es que cada uno simula lo que mandaría un
+          sistema distinto (un test runner, un flujo de Flowise, un paso de CI). Vos decidís la
+          forma del body de tu propio caller, y redactás el <code>--prompt-template</code> para
+          que tenga sentido con esa forma.
+        </p>
+        <div class="callout">
+          <span class="tag">tip</span>
+          <p>
+            Si el <code>Content-Type</code> no es <code>application/json</code> o el body no es
+            JSON válido, <code>{{payload}}</code> se reemplaza igual, pero con el texto crudo tal
+            cual — también funciona mandar texto plano en <code>-d</code>, no hace falta que sea JSON.
+          </p>
+        </div>
+      </section>
+
+      <section id="sessionid">
+        <h2>Sesión nueva vs. reanudar (<code>sessionId</code>)</h2>
+        <p>
+          Para hooks con consumer <code>spawn:claude</code>, el adaptador decide cómo lanzar Claude
+          según un único header en la request entrante:
+        </p>
+        <div class="diagram">POST /hook/&lt;nombre&gt;
+  header <span class="hl">sessionId</span> presente?
+    │
+    ├─ no  → claude -p "&lt;prompt&gt;" --output-format json
+    │        (arranca una sesión nueva)
+    │
+    └─ sí  → claude --resume &lt;sessionId&gt; -p "&lt;prompt&gt;" --output-format json
+             (reanuda esa sesión existente, con todo su contexto previo)</div>
+        <p>Para que <code>--resume</code> encuentre la sesión, el hook tiene que tener el <code>--workdir</code> igual al directorio del proyecto donde esa sesión se creó originalmente — las sesiones de Claude Code están asociadas a un directorio de trabajo.</p>
+        <div class="callout warn">
+          <span class="tag">detalle no obvio</span>
+          <p><code>--resume &lt;id&gt;</code> sin <code>-p</code>/<code>--print</code> abre el picker interactivo de Claude Code. En un proceso spawneado sin TTY eso se queda colgado para siempre — por eso el adaptador siempre agrega <code>-p</code> también en la rama de resume, no solo en la de sesión nueva.</p>
+        </div>
+
+        <h3>¿De dónde saco el <code>sessionId</code> que tengo que mandar?</h3>
+        <p>
+          No lo inventa el broker ni Claude: es el <strong>caller</strong> (tu script, tu flujo de
+          Flowise, tu pipeline de CI) el que tiene que conocerlo y mandarlo como header HTTP
+          literal <code>sessionId: &lt;uuid&gt;</code> en el <code>POST</code>. Tres formas de
+          conseguir ese UUID:
+        </p>
+        <ol>
+          <li>
+            <strong>Del propio Claude, en la primera respuesta.</strong> Toda invocación con
+            <code>--output-format json</code> devuelve un campo <code>session_id</code> en el
+            JSON de salida — incluida la que arranca <code>claude -p</code> sin resume. Guardalo
+            la primera vez y reusalo en las próximas llamadas al mismo hook para seguir esa misma
+            conversación.
+          </li>
+          <li>
+            <strong>De una sesión interactiva que ya tenés abierta.</strong> El id es el nombre
+            del archivo <code>&lt;sessionId&gt;.jsonl</code> dentro de
+            <code>~/.claude/projects/&lt;tu-proyecto-codificado&gt;/</code> (una carpeta por
+            proyecto, con guiones en vez de <code>/</code>). También lo ves en el picker de
+            <code>/resume</code> dentro de Claude Code.
+          </li>
+          <li>
+            <strong>De un log del broker.</strong> Cada invocación queda registrada en
+            <code>~/.agent-webhook-bridge/logs/&lt;hook&gt;-&lt;timestamp&gt;.log</code>, con la
+            respuesta completa de Claude — ahí también está el <code>session_id</code> usado.
+          </li>
+        </ol>
+        <p>Ejemplo de capturar el id en la primera llamada y reusarlo en la segunda:</p>
+        <pre><code># 1) primera llamada: sin sessionId, arranca una sesión nueva.
+#    -w guarda el body de la respuesta del broker, pero el session_id real
+#    vive en el log de la invocación de Claude (el broker solo confirma "ok").
+curl -s -X POST http://127.0.0.1:8890/hook/ci-failures \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;tu secreto&gt;" \
+  -d '{"log":"npm test exit 1"}'
+
+# 2) leé el session_id de esa corrida en el log más reciente del hook
+SID=$(ls -t ~/.agent-webhook-bridge/logs/ci-failures-*.log | head -1 \
+  | xargs cat | grep -o '"session_id":"[^"]*"' | cut -d'"' -f4)
+echo "session capturada: $SID"
+
+# 3) segunda llamada al mismo hook, ahora reanudando esa sesión
+curl -s -X POST http://127.0.0.1:8890/hook/ci-failures \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;tu secreto&gt;" \
+  -H "sessionId: $SID" \
+  -d '{"log":"el mismo build sigue fallando, segundo intento"}'</code></pre>
+      </section>
+
+      <section id="permisos">
+        <h2>Permisos en modo headless</h2>
+        <p>
+          Una corrida spawneada no tiene terminal: si el prompt le pide a Claude escribir o editar
+          un archivo, no hay nadie que apruebe ese permiso, así que <strong>por defecto la acción
+          queda denegada</strong> y Claude responde explicando que no pudo hacerlo. Esto pasa
+          incluso reanudando una sesión que interactivamente ya venías usando sin problema — el
+          permiso no "se hereda" a una corrida headless nueva.
+        </p>
+        <p>Log real de un hook sin <code>--permission-mode</code> pidiéndole que guarde un archivo:</p>
+        <pre><code>"result": "Sigo sin permiso para escribir el archivo -- el sistema requiere que
+alguien apruebe la acción de escritura desde la sesión interactiva ...",
+"permission_denials": [{ "tool_name": "Write", "tool_input": { "file_path": "..." } }]</code></pre>
+        <p>La solución es declarar <code>--permission-mode</code> al registrar el hook:</p>
+        <pre><code>awb rm resume
+awb add resume --trigger \
+  --workdir /home/lenovo/Documentos/free-code/free-code \
+  --permission-mode acceptEdits</code></pre>
+        <p>Con eso, el mismo pedido termina escribiendo el archivo de verdad:</p>
+        <pre><code>"result": "Guardado en `/home/lenovo/Documentos/free-code/free-code/resumen-sesion-flowise-webhook.md` (raíz del working directory)."</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Modo</th><th>Qué autoriza</th></tr></thead>
+            <tbody>
+              <tr><td><code>acceptEdits</code></td><td>Auto-aprueba <strong>Write/Edit</strong> de archivos. Es el que conviene para la mayoría de los hooks de automatización — no habilita nada más.</td></tr>
+              <tr><td><code>bypassPermissions</code></td><td>Salta <strong>todos</strong> los chequeos de permiso, incluido <code>Bash</code> arbitrario. Mismo riesgo que <code>--dangerously-skip-permissions</code>: solo tiene sentido en un sandbox aislado, no en tu máquina con tus repos reales.</td></tr>
+              <tr><td><code>plan</code> / <code>manual</code> / <code>dontAsk</code> / <code>auto</code></td><td>Otros modos de <code>claude</code>; ver <code>claude --help</code> para el detalle de cada uno.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="tag">a propósito, no default</span>
+          <p>
+            <code>permissionMode</code> queda <strong>sin setear por defecto</strong> en un hook
+            nuevo — tenés que pedirlo explícitamente. La razón: una vez que un hook puede escribir
+            sin preguntar, cualquiera que sepa el secreto del hook puede hacer que Claude escriba
+            archivos en ese <code>workdir</code> con el prompt que quiera. Usalo solo en hooks
+            donde confiás en la fuente del evento y en lo que el <code>--prompt-template</code>
+            le puede llegar a pedir a Claude que haga.
+          </p>
+        </div>
+      </section>
+
+      <section id="ejemplos">
+        <h2>Más ejemplos: registrar y disparar hooks</h2>
+
+        <h3>Trigger simple, con secreto compartido</h3>
+        <p>El caso base ya visto arriba: modo <code>trigger</code>, autenticación por <code>X-Webhook-Secret</code>.</p>
+        <pre><code>awb add ci-failures --trigger --workdir /home/lenovo/proyectos/mi-repo \
+  --prompt-template 'Build falló en CI:\n\n{{payload}}\n\nInvestigá la causa.'
+
+curl -X POST http://127.0.0.1:8890/hook/ci-failures \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;secreto de awb add&gt;" \
+  -d '{"branch":"main","step":"npm test","exitCode":1}'</code></pre>
+
+        <h3>Queue, para una fuente ruidosa (sin spawnear Claude por cada evento)</h3>
+        <p>
+          Un flujo de Flowise que dispara seguido no debería levantar una sesión de Claude por
+          cada evento — con <code>--queue</code> el evento solo se persiste en SQLite (ver
+          <a href="#limitaciones">Limitaciones</a> sobre cómo se lee hoy esa cola):
+        </p>
+        <pre><code>awb add flowise --queue --consumer queue
+
+curl -X POST http://127.0.0.1:8890/hook/flowise \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;secreto de awb add&gt;" \
+  -d '{"flow":"lead-scoring","result":"qualified","leadId":"8213"}'
+
+awb events flowise   # confirmar que quedó guardado, status "pending"</code></pre>
+
+        <h3>Autenticación por HMAC en vez de secreto compartido</h3>
+        <p>
+          Con <code>--hmac-secret</code>, en vez de mandar el secreto en un header lo usás para
+          firmar el body crudo y mandás la firma en <code>X-Signature: sha256=&lt;hex&gt;</code>:
+        </p>
+        <pre><code>awb add deploys --trigger --hmac-secret 'un-secreto-largo-y-random' \
+  --workdir /home/lenovo/proyectos/mi-repo
+
+BODY='{"env":"prod","status":"failed"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'un-secreto-largo-y-random' | sed 's/^.* //')
+
+curl -X POST http://127.0.0.1:8890/hook/deploys \
+  -H "Content-Type: application/json" \
+  -H "X-Signature: sha256=$SIG" \
+  -d "$BODY"</code></pre>
+        <div class="callout">
+          <span class="tag">sin --prompt-template</span>
+          <div>
+            <p>
+              A este <code>awb add</code> no le pasé <code>--prompt-template</code> a propósito,
+              para mostrar qué pasa si lo omitís: el broker usa la plantilla por defecto
+              <code>"Incoming webhook event for '{{hook}}':\n\n{{payload}}"</code>. Con el body de
+              arriba, el prompt que recibe Claude termina siendo:
+            </p>
+            <pre style="margin-top:0.6rem;"><code>Incoming webhook event for 'deploys':
+
+{
+  "env": "prod",
+  "status": "failed"
+}</code></pre>
+            <p style="margin-top:0.6rem;">
+              Para un caso real casi siempre conviene tu propio <code>--prompt-template</code> (que
+              le diga a Claude qué investigar o qué hacer), como en los demás ejemplos de esta guía.
+            </p>
+          </div>
+        </div>
+        <div class="callout warn">
+          <span class="tag">ojo con github</span>
+          <p>GitHub firma sus webhooks con <code>X-Hub-Signature-256</code>, no con
+          <code>X-Signature</code>. Si querés apuntar un webhook de GitHub directo a este broker
+          hoy, hace falta algo en el medio que renombre ese header (o reenviar el evento con un
+          script) — no hay soporte nativo para el nombre de header de GitHub todavía.</p>
+        </div>
+
+        <h3>Probar rápido con <code>awb test</code> (sin armar el curl a mano)</h3>
+        <pre><code># sesión nueva (sin sessionId)
+awb test ci-failures --body '{"log":"npm test exit 1"}'
+
+# reanuda una sesión existente
+awb test ci-failures --body '{"log":"npm test exit 1"}' \
+  --session-id d63be319-433a-4ae1-8a1c-a8a978e53d89</code></pre>
+        <p>El resultado de cada invocación (comando exacto, stdout/stderr de Claude) queda en <code>~/.agent-webhook-bridge/logs/&lt;hook&gt;-&lt;timestamp&gt;.log</code>.</p>
+      </section>
+
+      <section id="estado">
+        <h2>Ver estado</h2>
+        <pre><code>awb list             # hooks registrados, modo, URL, secreto
+awb url ci-failures  # detalle de un hook puntual
+awb events           # últimos eventos recibidos y su estado (pending/delivered/failed)
+awb events ci-failures</code></pre>
+      </section>
+
+      <section id="seguridad">
+        <h2>Seguridad</h2>
+        <ul>
+          <li>El servidor solo escucha en <code>127.0.0.1</code> — no queda expuesto en la red por defecto.</li>
+          <li>La autenticación es obligatoria por hook: un hook sin <code>secret</code> ni <code>hmacSecret</code> configurado nunca autentica ninguna request.</li>
+          <li>Para fuentes que no corren en la misma máquina (webhooks de GitHub, Flowise en otro host), poné el broker detrás de un túnel (<code>cloudflared</code>/<code>ngrok</code>) y preferí <code>hmacSecret</code> sobre secreto compartido plano.</li>
+          <li>Los payloads se guardan tal cual en <code>events.db</code> — si la fuente externa puede incluir tokens o secretos en el body (logs de CI, por ejemplo), tenelo en cuenta antes de compartir esa base de datos.</li>
+        </ul>
+      </section>
+
+      <section id="limitaciones">
+        <h2>Limitaciones actuales</h2>
+        <p>Esta es la fase 1 del roadmap (ver <code>PLAN.md</code> en la raíz del repo): broker + adaptador de spawn, solo para Claude Code.</p>
+        <ul>
+          <li>El modo <code>queue</code> persiste los eventos en SQLite, pero todavía no existe el adaptador MCP (<code>poll_events</code>/<code>wait_for_event</code>) para leerlos desde una sesión — eso es fase 2.</li>
+          <li>Cursor y Codex CLI no están soportados todavía en el spawn adapter — solo Claude Code.</li>
+          <li>No hay unidad de <code>systemd</code>/<code>launchd</code> ni instalador: <code>awb start</code> corre en primer plano y hay que supervisarlo a mano (o con <code>pm2</code>, <code>tmux</code>, etc.) si querés que sobreviva a un reinicio.</li>
+        </ul>
+      </section>
+
+      <section id="referencia">
+        <h2>Referencia de comandos</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Comando</th><th>Qué hace</th></tr></thead>
+            <tbody>
+              <tr><td><code>awb start</code></td><td>Corre el broker en primer plano.</td></tr>
+              <tr><td><code>awb add &lt;name&gt; [opciones]</code></td><td>Registra un hook nuevo (ver <a href="#hooks">Registrar un hook</a>).</td></tr>
+              <tr><td><code>awb rm &lt;name&gt;</code></td><td>Borra un hook.</td></tr>
+              <tr><td><code>awb list</code></td><td>Lista todos los hooks registrados.</td></tr>
+              <tr><td><code>awb url &lt;name&gt;</code></td><td>Muestra la URL y el header de auth de un hook.</td></tr>
+              <tr><td><code>awb events [name]</code></td><td>Muestra los últimos eventos recibidos (y su estado) desde SQLite.</td></tr>
+              <tr><td><code>awb test &lt;name&gt; [--body &lt;json&gt;] [--session-id &lt;id&gt;]</code></td><td>Dispara un evento real contra el broker corriendo, con o sin <code>sessionId</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>agent-webhook-bridge · fase 1 (MVP) · ver PLAN.md para el roadmap completo</footer>
+    </div>
+  </body>
+</html>
