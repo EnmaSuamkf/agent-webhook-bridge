@@ -28,26 +28,18 @@ function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
 	return template.replaceAll("{{payload}}", payload).replaceAll("{{hook}}", event.hook);
 }
 
-export function runClaude(hook: HookConfig, event: WebhookEvent): Promise<ClaudeRunResult> {
-	const prompt = renderPrompt(hook, event);
-	const sessionId = event.headers.sessionid;
-	const mode: "resume" | "new" = sessionId ? "resume" : "new";
-	// `--resume` alone opens the interactive picker (no TTY in a spawned
-	// child => hangs). `-p`/`--print` is required to make it headless too.
-	const args = sessionId
-		? ["--resume", sessionId, "-p", prompt, "--output-format", "json"]
-		: ["-p", prompt, "--output-format", "json"];
-	// Headless runs have no TTY to answer a permission prompt, so any
-	// Write/Edit/Bash the model attempts is auto-denied unless the hook opts
-	// into a permission mode explicitly.
-	if (hook.permissionMode) args.push("--permission-mode", hook.permissionMode);
-
-	const cwd = hook.workdir ?? process.cwd();
-	fs.mkdirSync(logsDir(), { recursive: true });
-	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
-	const logStream = fs.createWriteStream(logFile, { flags: "a" });
-	logStream.write(`$ claude ${args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-
+/**
+ * Runs `claude` hidden, stdout/stderr piped straight to the log file. Used
+ * for every hook by default, and as the fallback when `hook.visible` is set
+ * but no supported terminal emulator is installed.
+ */
+function runHidden(
+	args: string[],
+	cwd: string,
+	mode: "resume" | "new",
+	logFile: string,
+	logStream: fs.WriteStream,
+): Promise<ClaudeRunResult> {
 	return new Promise((resolve) => {
 		const child = spawn("claude", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 		child.stdout.pipe(logStream, { end: false });
@@ -62,4 +54,88 @@ export function runClaude(hook: HookConfig, event: WebhookEvent): Promise<Claude
 			resolve({ ok: false, mode, exitCode: null, logFile });
 		});
 	});
+}
+
+// Prints a `$ claude ...`/`cwd: ...` header (each arg shell-quoted with `%q`
+// for readability -- purely cosmetic, not re-parsed as shell code), then runs
+// "$@" itself. The whole block is piped through `tee` together so the header
+// and the run's own output both land in the terminal *and* the log file,
+// instead of the header only ever reaching the file (Node writing it before
+// the terminal even opens, as the hidden-mode header below does).
+const VISIBLE_SCRIPT =
+	'{ printf "$"; printf " %q" "$@"; echo; echo "cwd: $PWD"; echo; "$@"; } 2>&1 | tee -a "$AWB_LOGFILE"; ' +
+	'ec="${PIPESTATUS[0]}"; echo; echo "--- done (exit $ec) -- press Enter to close ---"; read -r; exit "$ec"';
+
+/**
+ * Runs `claude` in a visible gnome-terminal window (`--wait` so we still
+ * block on and learn the real exit code) so a person can read what it did,
+ * in addition to capturing it to the log file. Only `--output-format
+ * stream-json` actually streams token-by-token -- `text` (like `json`)
+ * prints once when the turn is done, so the window pauses on a keypress
+ * afterward instead of closing immediately; without that pause it's just a
+ * blank window that flashes the result and vanishes before it's readable.
+ * `args` are forwarded to the inner `bash -c` as literal argv entries (via
+ * `$@`), never interpolated into the shell script string -- an
+ * attacker-controlled prompt containing `` ` ``/`$()`/`;` etc. is inert data,
+ * not executed. Falls back to `runHidden` if gnome-terminal isn't installed.
+ */
+function runVisible(args: string[], cwd: string, mode: "resume" | "new", logFile: string): Promise<ClaudeRunResult> {
+	return new Promise((resolve) => {
+		const child = spawn(
+			"gnome-terminal",
+			[
+				"--wait",
+				`--working-directory=${cwd}`,
+				"--",
+				"bash",
+				"-c",
+				VISIBLE_SCRIPT,
+				"bash",
+				"claude",
+				...args,
+			],
+			{ cwd, env: { ...process.env, AWB_LOGFILE: logFile }, stdio: "ignore" },
+		);
+		child.on("close", (exitCode) => {
+			resolve({ ok: exitCode === 0, mode, exitCode, logFile });
+		});
+		child.on("error", (err) => {
+			const logStream = fs.createWriteStream(logFile, { flags: "a" });
+			logStream.write(`gnome-terminal unavailable (${String(err)}), falling back to hidden run\n`);
+			logStream.write(`$ claude ${args.join(" ")}\ncwd: ${cwd}\n\n`);
+			runHidden(args, cwd, mode, logFile, logStream).then(resolve);
+		});
+	});
+}
+
+export function runClaude(hook: HookConfig, event: WebhookEvent): Promise<ClaudeRunResult> {
+	const prompt = renderPrompt(hook, event);
+	const sessionId = event.headers.sessionid;
+	const mode: "resume" | "new" = sessionId ? "resume" : "new";
+	// `--resume` alone opens the interactive picker (no TTY in a spawned
+	// child => hangs). `-p`/`--print` is required to make it headless too.
+	// `text` is used instead of `json` when visible so the terminal shows
+	// Claude's plain-language result instead of a raw JSON blob (the pause
+	// in runVisible is what actually makes it readable before the window
+	// closes -- neither format streams token-by-token, only stream-json does).
+	const outputFormat = hook.visible ? "text" : "json";
+	const args = sessionId
+		? ["--resume", sessionId, "-p", prompt, "--output-format", outputFormat]
+		: ["-p", prompt, "--output-format", outputFormat];
+	// Headless runs have no TTY to answer a permission prompt, so any
+	// Write/Edit/Bash the model attempts is auto-denied unless the hook opts
+	// into a permission mode explicitly.
+	if (hook.permissionMode) args.push("--permission-mode", hook.permissionMode);
+
+	const cwd = hook.workdir ?? process.cwd();
+	fs.mkdirSync(logsDir(), { recursive: true });
+	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
+
+	if (hook.visible) return runVisible(args, cwd, mode, logFile);
+
+	// Hidden mode: Node owns the log file directly, so the header is written
+	// here up front (there's no terminal shell to print its own).
+	const logStream = fs.createWriteStream(logFile, { flags: "a" });
+	logStream.write(`$ claude ${args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
+	return runHidden(args, cwd, mode, logFile, logStream);
 }

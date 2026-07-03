@@ -16,6 +16,7 @@ only for now. The full guide with more examples lives in [`web-docs/index.html`]
 - [Registering a hook](#registering-a-hook)
 - [New session vs. resuming (`sessionId`)](#new-session-vs-resuming-sessionid)
 - [Permissions in headless mode](#permissions-in-headless-mode)
+- [Visible mode](#visible-mode)
 - [Examples](#examples)
 - [Checking status](#checking-status)
 - [Security](#security)
@@ -101,6 +102,7 @@ Prompt:     A CI build failed. Log:\n\n{{payload}}\n\nInvestigate the cause.
 | `--workdir <dir>` | `cwd` of the spawned `claude` process. It's also the key that serializes runs: two events with the same `workdir` never run `claude` in parallel on the same repo. |
 | `--secret <s>` / `--hmac-secret <s>` | Authentication. If you don't provide either, a random one is generated. With `--hmac-secret` the caller signs the raw body instead of sending the secret in a header. |
 | `--permission-mode <mode>` | Passed straight through as claude's `--permission-mode` (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`). Without this, headless runs can't write or edit anything (see [Permissions in headless mode](#permissions-in-headless-mode)). |
+| `--visible` | Runs `claude` in a visible gnome-terminal window instead of hidden (see [Visible mode](#visible-mode)). |
 
 ### The `curl` body is yours, not a fixed format
 
@@ -235,13 +237,52 @@ With that, the same request ends up actually writing the file:
 |---|---|
 | `acceptEdits` | Auto-approves file **Write/Edit**. This is the one that fits most automation hooks — it doesn't enable anything else. |
 | `bypassPermissions` | Skips **all** permission checks, including arbitrary `Bash`. Same risk as `--dangerously-skip-permissions`: only makes sense in an isolated sandbox, not on your machine with your real repos. |
-| `plan` / `manual` / `dontAsk` / `auto` | Other `claude` modes; see `claude --help` for details on each. |
+| `dontAsk` | Tested and it does **not** authorize Write/Bash despite the name -- in a real headless run it still denied the write, same as leaving this unset. Don't rely on it to enable edits. |
+| `plan` / `manual` / `auto` | Other `claude` modes, untested here; see `claude --help` for details on each. |
 
 > **Opt-in on purpose, not a default:** `permissionMode` is **left unset by default** on a new
 > hook — you have to ask for it explicitly. The reason: once a hook can write without asking,
 > anyone who knows the hook's secret can make Claude write files in that `workdir` with whatever
 > prompt they want. Only use it on hooks where you trust the event source and what the
 > `--prompt-template` might end up asking Claude to do.
+
+## Visible mode
+
+By default a spawned run shows nothing -- the command runs hidden and all its stdout/stderr goes
+straight to the log. With `--visible`, instead, a gnome-terminal window opens showing the exact
+command and the response:
+
+```bash
+awb add resume --trigger \
+  --workdir /home/lenovo/Documentos/free-code/free-code \
+  --permission-mode acceptEdits \
+  --visible
+```
+
+What shows up in the window:
+
+```
+$ claude --resume d63be319-433a-4ae1-8a1c-a8a978e53d89 -p '...' --output-format text --permission-mode acceptEdits
+cwd: /home/lenovo/Documentos/free-code/free-code
+
+Saved successfully to `/home/lenovo/Documentos/free-code/free-code/resumen-....md` ...
+
+--- done (exit 0) -- press Enter to close ---
+```
+
+> **Non-obvious detail:** only `--output-format stream-json` streams token by token. `text`
+> (like `json`) prints everything at once when the turn is done -- that's why the window sits
+> blank while Claude works and dumps it all at the end. Without the `press Enter to close` pause,
+> the window would close itself the instant it's done, before you'd have time to read it -- so
+> visible mode always waits for your Enter before closing, unlike hidden mode.
+
+That pause has a consequence: the event stays "in progress" in the broker until you close the
+window. Since runs are serialized per `workdir` (see the option table in
+[Registering a hook](#registering-a-hook)), if you leave the window open the next event for that
+same `workdir` will queue up until you close it.
+
+Only `gnome-terminal` is supported for now (Linux/GNOME). If it isn't installed, it falls back to
+the usual hidden mode automatically without breaking the hook.
 
 ## Examples
 

@@ -34,6 +34,9 @@ Commands:
                                           Unset by default -- headless runs have no TTY, so any
                                           Write/Edit/Bash the model attempts is auto-denied unless
                                           you opt in here. acceptEdits is the least-risky opt-in.
+    --visible                            Run spawned claude in a visible gnome-terminal window
+                                          (streams live, closes when done) instead of hidden.
+                                          Falls back to hidden if gnome-terminal isn't installed.
   rm <name>                              Remove a hook
   list                                   List hooks
   url <name>                             Show callback URL + auth header
@@ -72,6 +75,7 @@ function describeHook(name: string, hook: HookConfig, cfg: BridgeConfig): string
 		hook.hmacSecret ? "HMAC:       X-Signature: sha256=<hmac-sha256(hmacSecret, rawBody)>" : "",
 		hook.workdir ? `Workdir:    ${hook.workdir}` : "",
 		hook.permissionMode ? `Permission: ${hook.permissionMode}` : "",
+		hook.visible ? "Visible:    yes (gnome-terminal)" : "",
 		hook.promptTemplate ? `Prompt:     ${hook.promptTemplate}` : "",
 	]
 		.filter(Boolean)
@@ -124,6 +128,7 @@ async function main(): Promise<void> {
 			return;
 		}
 		const permissionMode = permissionModeArg as PermissionMode | undefined;
+		const visible = rest.includes("--visible");
 
 		const hook: HookConfig = {
 			mode,
@@ -133,6 +138,7 @@ async function main(): Promise<void> {
 			...(promptTemplate ? { promptTemplate } : {}),
 			...(workdir ? { workdir } : {}),
 			...(permissionMode ? { permissionMode } : {}),
+			...(visible ? { visible } : {}),
 		};
 		cfg.hooks[name] = hook;
 		saveConfig(cfg);

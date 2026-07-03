@@ -41,6 +41,13 @@ export interface HookConfig {
 	 * what that hook's prompt asks the agent to do.
 	 */
 	permissionMode?: PermissionMode;
+	/**
+	 * Run spawned claude invocations in a visible gnome-terminal window
+	 * instead of hidden/piped-to-logfile. Streams live (forces
+	 * --output-format text instead of json, which only prints once at the
+	 * end). Falls back to hidden if gnome-terminal isn't installed.
+	 */
+	visible?: boolean;
 }
 
 export interface BridgeConfig {
