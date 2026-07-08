@@ -35,7 +35,15 @@ export interface ClaudeRunResult {
 const MAX_STDOUT_CAPTURE = 4 * 1024 * 1024;
 
 function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
-	const payload = typeof event.body === "string" ? event.body : JSON.stringify(event.body, null, 2);
+	// `callbackUrl` is broker plumbing (consumed by dispatch to report the
+	// result), not task content — leaving it in {{payload}} makes the spawned
+	// agent try to POST it itself, and headless runs can't.
+	let body = event.body;
+	if (typeof body === "object" && body !== null && "callbackUrl" in body) {
+		const { callbackUrl: _, ...rest } = body as Record<string, unknown>;
+		body = rest;
+	}
+	const payload = typeof body === "string" ? body : JSON.stringify(body, null, 2);
 	const template = hook.promptTemplate ?? "Incoming webhook event for '{{hook}}':\n\n{{payload}}";
 	return template.replaceAll("{{payload}}", payload).replaceAll("{{hook}}", event.hook);
 }
