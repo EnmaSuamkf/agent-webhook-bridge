@@ -20,10 +20,30 @@ export interface ClaudeRunResult {
 	mode: "resume" | "new";
 	exitCode: number | null;
 	logFile: string;
+	/**
+	 * Claude's stdout (the `--output-format json` blob), captured so dispatch
+	 * can forward the result to a caller-provided `callbackUrl`. Absent in
+	 * visible mode, where stdout goes to the terminal via `tee` instead of
+	 * through this process.
+	 */
+	stdout?: string;
 }
 
+// Callback payloads only need the result JSON (a few KB); cap the in-memory
+// capture so a runaway run can't balloon the broker's heap. The log file
+// still gets everything regardless.
+const MAX_STDOUT_CAPTURE = 4 * 1024 * 1024;
+
 function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
-	const payload = typeof event.body === "string" ? event.body : JSON.stringify(event.body, null, 2);
+	// `callbackUrl` is broker plumbing (consumed by dispatch to report the
+	// result), not task content — leaving it in {{payload}} makes the spawned
+	// agent try to POST it itself, and headless runs can't.
+	let body = event.body;
+	if (typeof body === "object" && body !== null && "callbackUrl" in body) {
+		const { callbackUrl: _, ...rest } = body as Record<string, unknown>;
+		body = rest;
+	}
+	const payload = typeof body === "string" ? body : JSON.stringify(body, null, 2);
 	const template = hook.promptTemplate ?? "Incoming webhook event for '{{hook}}':\n\n{{payload}}";
 	return template.replaceAll("{{payload}}", payload).replaceAll("{{hook}}", event.hook);
 }
@@ -42,11 +62,19 @@ function runHidden(
 ): Promise<ClaudeRunResult> {
 	return new Promise((resolve) => {
 		const child = spawn("claude", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const stdoutChunks: Buffer[] = [];
+		let stdoutSize = 0;
+		child.stdout.on("data", (chunk: Buffer) => {
+			if (stdoutSize >= MAX_STDOUT_CAPTURE) return;
+			stdoutChunks.push(chunk);
+			stdoutSize += chunk.length;
+		});
 		child.stdout.pipe(logStream, { end: false });
 		child.stderr.pipe(logStream, { end: false });
 		child.on("close", (exitCode) => {
 			logStream.end();
-			resolve({ ok: exitCode === 0, mode, exitCode, logFile });
+			const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+			resolve({ ok: exitCode === 0, mode, exitCode, logFile, stdout });
 		});
 		child.on("error", (err) => {
 			logStream.write(`\nspawn error: ${String(err)}\n`);

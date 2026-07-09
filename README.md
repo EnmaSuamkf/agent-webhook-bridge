@@ -15,6 +15,7 @@ only for now. The full guide with more examples lives in [`web-docs/index.html`]
 - [Quickstart](#quickstart)
 - [Registering a hook](#registering-a-hook)
 - [New session vs. resuming (`sessionId`)](#new-session-vs-resuming-sessionid)
+- [Result callback (`callbackUrl`)](#result-callback-callbackurl)
 - [Permissions in headless mode](#permissions-in-headless-mode)
 - [Visible mode](#visible-mode)
 - [Examples](#examples)
@@ -202,6 +203,39 @@ curl -s -X POST http://127.0.0.1:8890/hook/ci-failures \
   -H "sessionId: $SID" \
   -d '{"log":"same build still failing, second attempt"}'
 ```
+
+## Result callback (`callbackUrl`)
+
+`POST /hook/<name>` always answers `{"ok":true}` immediately — the Claude run happens in the
+background and its output only lands in the log file. If the caller needs the result back
+(a job queue, an orchestrator like AgentMesh, a script that waits for the answer), include a
+`callbackUrl` field in the JSON body of the event:
+
+```bash
+curl -X POST http://127.0.0.1:8890/hook/mesh-worker \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: <secret>" \
+  -d '{"jobId":"job-001","input":"Summarize this…","callbackUrl":"http://127.0.0.1:9000/jobs/job-001/result"}'
+```
+
+When the spawned run finishes, the broker POSTs the outcome to that URL as JSON:
+
+```json
+{"ok":true,"exitCode":0,"mode":"new","result":"…Claude's final answer…","session_id":"42e0b31f-…"}
+```
+
+- `result` and `session_id` are lifted from Claude's `--output-format json` envelope, so the
+  caller can chain a follow-up request with the `sessionId` header without grepping logs.
+- If the spawn itself fails, the callback body is `{"ok":false,"error":"…"}`; if the run exits
+  non-zero, `ok` is `false` with the `exitCode`.
+- Delivery is best-effort: one retry, 10s timeout per attempt, and a broker log entry either way.
+  The log file in `~/.agent-webhook-bridge/logs/` remains the source of truth.
+- **Only loopback URLs are accepted** (`http://127.0.0.1`, `http://localhost`, `http://[::1]`) —
+  anything else is ignored with a warning, so a caller can't use the broker as a proxy to hit
+  arbitrary hosts. When the consumer runs on another machine, put a local tunnel/relay in front,
+  same as for inbound webhooks.
+- Visible mode (`--visible`) captures no stdout (the output goes to the terminal via `tee`), so
+  its callbacks carry `ok`/`exitCode` but no `result` — use hidden mode for automation loops.
 
 ## Permissions in headless mode
 

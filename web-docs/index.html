@@ -192,6 +192,7 @@
           <a href="#starting-the-broker">Starting the broker</a>
           <a href="#registering-a-hook">Registering a hook</a>
           <a href="#new-session-vs-resuming-sessionid">New session vs. resume</a>
+          <a href="#result-callback-callbackurl">Result callback</a>
           <a href="#permissions-in-headless-mode">Headless permissions</a>
           <a href="#visible-mode">Visible mode</a>
           <a href="#examples">Examples</a>
@@ -370,6 +371,50 @@ curl -s -X POST http://127.0.0.1:8890/hook/ci-failures \
   -H "X-Webhook-Secret: &lt;your secret&gt;" \
   -H "sessionId: $SID" \
   -d '{"log":"same build still failing, second attempt"}'</code></pre>
+      </section>
+
+      <section id="result-callback-callbackurl">
+        <h2>Result callback (<code>callbackUrl</code>)</h2>
+        <p>
+          <code>POST /hook/&lt;name&gt;</code> always answers <code>{"ok":true}</code> immediately —
+          the Claude run happens in the background and its output only lands in the log file. If
+          the caller needs the result back (a job queue, an orchestrator like AgentMesh, a script
+          that waits for the answer), include a <code>callbackUrl</code> field in the JSON body of
+          the event:
+        </p>
+        <pre><code>curl -X POST http://127.0.0.1:8890/hook/mesh-worker \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: &lt;secret&gt;" \
+  -d '{"jobId":"job-001","input":"Summarize this…","callbackUrl":"http://127.0.0.1:9000/jobs/job-001/result"}'</code></pre>
+        <p>When the spawned run finishes, the broker POSTs the outcome to that URL as JSON:</p>
+        <pre><code>{"ok":true,"exitCode":0,"mode":"new","result":"…Claude's final answer…","session_id":"42e0b31f-…"}</code></pre>
+        <ul>
+          <li><code>result</code> and <code>session_id</code> are lifted from Claude's <code>--output-format json</code> envelope, so the caller can chain a follow-up request with the <code>sessionId</code> header without grepping logs.</li>
+          <li>If the spawn itself fails, the callback body is <code>{"ok":false,"error":"…"}</code>; if the run exits non-zero, <code>ok</code> is <code>false</code> with the <code>exitCode</code>.</li>
+          <li>Delivery is best-effort: one retry, 10s timeout per attempt, and a broker log entry either way. The log file in <code>~/.agent-webhook-bridge/logs/</code> remains the source of truth.</li>
+        </ul>
+        <div class="callout">
+          <span class="tag">security</span>
+          <p>
+            <strong>Only loopback URLs are accepted</strong> (<code>http://127.0.0.1</code>,
+            <code>http://localhost</code>, <code>http://[::1]</code>) — anything else is ignored
+            with a warning, so a caller can't use the broker as a proxy to hit arbitrary hosts.
+            When the consumer runs on another machine, put a local tunnel/relay in front, same as
+            for inbound webhooks.
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="tag">non-obvious detail</span>
+          <p>
+            <code>callbackUrl</code> is consumed by the broker and <strong>stripped from
+            <code>{{payload}}</code></strong> before the prompt is rendered — it's plumbing, not
+            task content. Leaving it visible made the spawned agent try to POST it itself, which a
+            headless run can't do. Same treatment as the <code>sessionId</code> header. Also note
+            visible mode (<code>--visible</code>) captures no stdout (the output goes to the
+            terminal via <code>tee</code>), so its callbacks carry <code>ok</code>/<code>exitCode</code>
+            but no <code>result</code> — use hidden mode for automation loops.
+          </p>
+        </div>
       </section>
 
       <section id="permissions-in-headless-mode">
