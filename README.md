@@ -1,11 +1,13 @@
 # agent-webhook-bridge
 
-A standalone HTTP broker that receives external webhooks (CI, GitHub, Flowise…) and wakes up
-Claude Code — either as a brand-new session or by resuming an existing one — without Claude
+A standalone HTTP broker that receives external webhooks (CI, GitHub, Flowise…) and wakes up a
+coding agent — either as a brand-new session or by resuming an existing one — without the agent
 having to be running beforehand.
 
-This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapter, Claude Code
-only for now. The full guide with more examples lives in [`web-docs/index.html`](web-docs/index.html)
+Two runtimes are supported in the spawn adapter: **Claude Code** (the default) and **[free-code](https://github.com/EnmaSuamkf/free-code)**.
+They share the same hook protocol (`secret`/`callbackUrl`/`sessionId`), so the broker, the AgentMesh hub, and the caller code stay runtime-agnostic — you just pick which CLI a hook spawns with `--runner`.
+
+This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapter. The full guide with more examples lives in [`web-docs/index.html`](web-docs/index.html)
 (open it in a browser); this README is the condensed version.
 
 ## Table of contents
@@ -22,14 +24,17 @@ only for now. The full guide with more examples lives in [`web-docs/index.html`]
 - [Checking status](#checking-status)
 - [Security](#security)
 - [Current limitations](#current-limitations)
+- [free-code adapter](#free-code-adapter)
 - [Command reference](#command-reference)
 
 ## Requirements
 
 - **Node.js 24 or newer.** The broker uses `node:sqlite` (no native dependencies) and runs the
   `.ts` files directly — there's no build step.
-- **Claude Code CLI** installed and authenticated, with the `claude` binary on the `PATH` of the
-  machine where the broker runs.
+- **Claude Code CLI** *and/or* **free-code CLI** installed and authenticated, with the `claude`
+  and/or `free-code` binary on the `PATH` of the machine where the broker runs. A hook spawns
+  whichever one its `--runner` selects (default `claude`), so you only need the binary/ies you
+  actually use.
 
 ## Installation
 
@@ -97,13 +102,14 @@ Prompt:     A CI build failed. Log:\n\n{{payload}}\n\nInvestigate the cause.
 
 | Option | What it does |
 |---|---|
-| `--trigger` / `--queue` | Delivery mode. `trigger` (default) fires `spawn:claude` as soon as the event arrives. `queue` only persists it in SQLite, for a future read adapter (see [Current limitations](#current-limitations)). |
-| `--consumer <c>` | Repeatable. Default: `spawn:claude` for `trigger`, `queue` for `queue`. |
-| `--prompt-template <text>` | Template for the prompt Claude receives. `{{payload}}` is replaced with the event body (formatted as JSON if it isn't plain text); `{{hook}}` with the hook's name. |
-| `--workdir <dir>` | `cwd` of the spawned `claude` process. It's also the key that serializes runs: two events with the same `workdir` never run `claude` in parallel on the same repo. |
+| `--trigger` / `--queue` | Delivery mode. `trigger` (default) fires the spawn adapter as soon as the event arrives. `queue` only persists it in SQLite, for a future read adapter (see [Current limitations](#current-limitations)). |
+| `--runner <claude\|free-code>` | Which CLI a `trigger` hook spawns. Default: `claude`. Shortcut for `--consumer spawn:claude` / `--consumer spawn:free-code`; an explicit `--consumer` wins. The two adapters share the same hook protocol (secret, `callbackUrl`, `sessionId`), so the broker and callers don't change — only the binary that gets spawned does. See [free-code adapter](#free-code-adapter) for the session/permission differences. |
+| `--consumer <c>` | Repeatable. Default: `spawn:claude` for `trigger` (or `spawn:free-code` when `--runner free-code`), `queue` for `queue`. Use `spawn:free-code` to wake [free-code](https://github.com/EnmaSuamkf/free-code) instead of Claude Code. |
+| `--prompt-template <text>` | Template for the prompt the spawned agent receives. `{{payload}}` is replaced with the event body (formatted as JSON if it isn't plain text); `{{hook}}` with the hook's name. |
+| `--workdir <dir>` | `cwd` of the spawned process. It's also the key that serializes runs: two events with the same `workdir` never run in parallel on the same repo. |
 | `--secret <s>` / `--hmac-secret <s>` | Authentication. If you don't provide either, a random one is generated. With `--hmac-secret` the caller signs the raw body instead of sending the secret in a header. |
-| `--permission-mode <mode>` | Passed straight through as claude's `--permission-mode` (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`). Without this, headless runs can't write or edit anything (see [Permissions in headless mode](#permissions-in-headless-mode)). |
-| `--visible` | Runs `claude` in a visible gnome-terminal window instead of hidden (see [Visible mode](#visible-mode)). |
+| `--permission-mode <mode>` | For `--runner claude` this is passed straight through as claude's `--permission-mode` (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`). For `--runner free-code` it's mapped to that adapter's `--tools` flag (see [Permissions in headless mode](#permissions-in-headless-mode)). Without this, headless runs can't write or edit anything. |
+| `--visible` | Runs the spawned agent (`claude` or `free-code`) in a visible gnome-terminal window instead of hidden (see [Visible mode](#visible-mode)). |
 
 ### The `curl` body is yours, not a fixed format
 
@@ -144,8 +150,12 @@ special parsing of `branch`/`step`/`exitCode` on the broker's side.
 
 ## New session vs. resuming (`sessionId`)
 
-For hooks with the `spawn:claude` consumer, the adapter decides how to launch Claude based on a
-single header in the incoming request:
+For hooks with a `spawn:*` consumer, the adapter decides how to launch the agent based on a
+single header in the incoming request. Both adapters use the same header (`sessionId`), so the
+caller's protocol is identical regardless of `--runner` — only the *value* differs: a Claude
+Code session uuid for `claude`, a `.jsonl` path for `free-code`.
+
+### `--runner claude` (default)
 
 ```
 POST /hook/<name>
@@ -166,6 +176,34 @@ directory.
 > picker. In a spawned process with no TTY that hangs forever — that's why the adapter always
 > adds `-p` on the resume branch too, not just on the new-session one.
 
+### `--runner free-code`
+
+free-code resumes by **.jsonl path**, not by a uuid. The adapter keeps every session file under
+`~/.agent-webhook-bridge/sessions/<hook>/`, and the `session_id` it returns in the callback is
+*that path* — so to continue a conversation you just send it back as the `sessionId` header,
+exactly like with claude:
+
+```
+POST /hook/<name>
+  sessionId header present?
+    │
+    ├─ no  → free-code -p "<prompt>" --mode json --session <minted .jsonl path>
+    │        (a new file is created under sessions/<hook>/; its path comes back as session_id)
+    │
+    └─ yes → free-code -p "<prompt>" --mode json --session <sessionId header value>
+             (resumes that exact file, with all its prior context)
+```
+
+A `sessionId` header that points outside `~/.agent-webhook-bridge/sessions/` is treated as
+untrusted (path-traversal guard) and a fresh session starts instead — the broker never opens an
+arbitrary caller-supplied path.
+
+> **free-code's `--mode json` is not a single envelope** the way claude's `--output-format json`
+> is: it emits an NDJSON event stream (a session header line, then one event per
+> message/turn/tool). The adapter consumes that stream and reshapes it into the same
+> `{result, session_id}` envelope the claude adapter produces, so the callback body and the
+> AgentMesh hub see one uniform shape from either runtime.
+
 ### Where do I get the `sessionId` I need to send?
 
 The broker and Claude don't invent it: it's the **caller** (your script, your Flowise flow, your
@@ -183,7 +221,9 @@ CI pipeline) that has to know it and send it as a literal HTTP header `sessionId
    `~/.agent-webhook-bridge/logs/<hook>-<timestamp>.log`, with Claude's full response — the
    `session_id` used is in there too.
 
-Example of capturing the id on the first call and reusing it on the second:
+Example of capturing the id on the first call and reusing it on the second (works the same
+for either runner — the `SID` value just differs, a uuid for claude and a `.jsonl` path for
+free-code):
 
 ```bash
 # 1) first call: no sessionId, starts a brand-new session.
@@ -204,9 +244,13 @@ curl -s -X POST http://127.0.0.1:8890/hook/ci-failures \
   -d '{"log":"same build still failing, second attempt"}'
 ```
 
+For `--runner free-code` you can skip the log grep: the first call's callback body already
+carries `session_id` as the `.jsonl` path (same as claude's callback does), so capture it there
+if you're using `callbackUrl`.
+
 ## Result callback (`callbackUrl`)
 
-`POST /hook/<name>` always answers `{"ok":true}` immediately — the Claude run happens in the
+`POST /hook/<name>` always answers `{"ok":true}` immediately — the agent run happens in the
 background and its output only lands in the log file. If the caller needs the result back
 (a job queue, an orchestrator like AgentMesh, a script that waits for the answer), include a
 `callbackUrl` field in the JSON body of the event:
@@ -239,12 +283,19 @@ When the spawned run finishes, the broker POSTs the outcome to that URL as JSON:
 
 ## Permissions in headless mode
 
-A spawned run has no terminal: if the prompt asks Claude to write or edit a file, there's no one
-to approve that permission, so **by default the action is denied** and Claude explains it
-couldn't do it. This happens even when resuming a session you've been using interactively without
-issues — the permission doesn't "carry over" to a new headless run.
+A spawned run has no terminal. What happens when the prompt asks the agent to write or edit a
+file depends on the runner:
 
-Real log from a hook without `--permission-mode` being asked to save a file:
+- **`--runner claude` (default):** Claude Code auto-denies Write/Edit/Bash when no one is there
+  to approve the permission, and explains it couldn't do it. This happens even when resuming a
+  session you've been using interactively without issues — the permission doesn't "carry over" to
+  a new headless run.
+- **`--runner free-code`:** free-code has no runtime auto-deny; instead the adapter scopes what
+  the agent *can* attempt by choosing its `--tools` flag set from the hook's `--permission-mode`
+  (see the table below). With the default (no `--permission-mode`) it runs read-only, so the agent
+  literally has no Write/Edit/Bash tool to call — it answers from reading alone.
+
+Real log from a claude hook without `--permission-mode` being asked to save a file:
 
 ```
 "result": "I still don't have permission to write the file -- the system requires
@@ -267,12 +318,14 @@ With that, the same request ends up actually writing the file:
 "result": "Saved to `/home/lenovo/Documentos/free-code/free-code/resumen-sesion-flowise-webhook.md` (root of the working directory)."
 ```
 
-| Mode | What it authorizes |
-|---|---|
-| `acceptEdits` | Auto-approves file **Write/Edit**. This is the one that fits most automation hooks — it doesn't enable anything else. |
-| `bypassPermissions` | Skips **all** permission checks, including arbitrary `Bash`. Same risk as `--dangerously-skip-permissions`: only makes sense in an isolated sandbox, not on your machine with your real repos. |
-| `dontAsk` | Tested and it does **not** authorize Write/Bash despite the name -- in a real headless run it still denied the write, same as leaving this unset. Don't rely on it to enable edits. |
-| `plan` / `manual` / `auto` | Other `claude` modes, untested here; see `claude --help` for details on each. |
+| Mode | What it authorizes (claude) | free-code `--tools` it maps to |
+|---|---|---|
+| *(unset)* | Auto-denies Write/Edit/Bash — the agent answers but can't mutate. | `read,grep,find,ls` (read-only). The safe AgentMesh default. |
+| `acceptEdits` | Auto-approves file **Write/Edit**. This is the one that fits most automation hooks — it doesn't enable anything else. | `read,edit,write,grep,find,ls` (no `bash`). |
+| `bypassPermissions` | Skips **all** permission checks, including arbitrary `Bash`. Same risk as `--dangerously-skip-permissions`: only makes sense in an isolated sandbox, not on your machine with your real repos. | `read,bash,edit,write,grep,find,ls` (full, incl. `bash`). Same risk profile. |
+| `dontAsk` | Tested and it does **not** authorize Write/Bash despite the name -- in a real headless run it still denied the write, same as leaving this unset. Don't rely on it to enable edits. | maps to the full set like `bypassPermissions` — for free-code, where there's no runtime prompt to answer, `dontAsk` means "don't gate it", so it's treated as full access. Same risk. |
+| `auto` | Other `claude` mode, untested here; see `claude --help`. | maps to the full set like `bypassPermissions`. |
+| `plan` / `manual` | Other `claude` modes that prompt; a spawned run has no TTY to confirm. | `read,grep,find,ls` (read-only) — there's no one to confirm a prompt. |
 
 > **Opt-in on purpose, not a default:** `permissionMode` is **left unset by default** on a new
 > hook — you have to ask for it explicitly. The reason: once a hook can write without asking,
@@ -379,12 +432,13 @@ you'll almost always want your own `--prompt-template`.
 # brand-new session (no sessionId)
 awb test ci-failures --body '{"log":"npm test exit 1"}'
 
-# resumes an existing session
+# resumes an existing session (a claude uuid for --runner claude,
+# a .jsonl path for --runner free-code)
 awb test ci-failures --body '{"log":"npm test exit 1"}' \
   --session-id d63be319-433a-4ae1-8a1c-a8a978e53d89
 ```
 
-The result of every invocation (exact command, Claude's stdout/stderr) is saved at
+The result of every invocation (exact command, the agent's stdout/stderr) is saved at
 `~/.agent-webhook-bridge/logs/<hook>-<timestamp>.log`.
 
 ## Checking status
@@ -409,26 +463,59 @@ awb events ci-failures
 
 ## Current limitations
 
-This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapter, Claude Code
-only.
+This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapter.
 
 - `queue` mode persists events in SQLite, but there's no MCP adapter yet (`poll_events`/
   `wait_for_event`) to read them from a session — that's phase 2.
-- Cursor and Codex CLI aren't supported yet in the spawn adapter — Claude Code only.
+- Cursor and Codex CLI aren't supported yet in the spawn adapter — Claude Code and free-code only.
 - There's no `systemd`/`launchd` unit or installer: `awb start` runs in the foreground and you
   have to supervise it yourself (or with `pm2`, `tmux`, etc.) if you want it to survive a reboot.
+
+## free-code adapter
+
+[free-code](https://github.com/EnmaSuamkf/free-code) is the second runtime the spawn adapter
+knows how to wake. It's a full-featured coding agent with its own CLI (`free-code`), a
+`-p`/`--print` headless mode, and a `--mode json` NDJSON event stream — the adapter turns that
+stream into the same `{result, session_id}` envelope the claude adapter produces, so from the
+broker/hub side the two are interchangeable.
+
+Register a hook that spawns free-code instead of claude with `--runner free-code` (or
+`--consumer spawn:free-code`):
+
+```bash
+awb add fc-worker --runner free-code \
+  --workdir ~/agentmesh-sandbox \
+  --prompt-template 'You are an AgentMesh agent. Incoming task:\n\n{{payload}}\n\nDo the task and answer with the final result.'
+```
+
+Everything else works the same: `--secret`/`--hmac-secret` for auth, `callbackUrl` in the body
+to get the result back, `--visible` for a live terminal window. The only differences from a
+`--runner claude` hook are:
+
+- **Sessions resume by `.jsonl` path**, kept under `~/.agent-webhook-bridge/sessions/<hook>/`.
+  The callback's `session_id` is that path; send it back as the `sessionId` header to continue.
+  (See [New session vs. resuming](#new-session-vs-resuming-sessionid).)
+- **`--permission-mode` is mapped to `--tools`**, not forwarded as a flag (free-code has no
+  `--permission-mode`). See the table in [Permissions in headless mode](#permissions-in-headless-mode).
+- The adapter passes `--no-extensions --no-skills --no-prompt-templates --no-themes --no-rag-server`
+  so a sandbox workdir with untrusted job input can't make free-code discover and run code from
+  local skills/extensions it finds there.
+
+This is the runtime the AgentMesh concept paper had in mind for the single-operator bridge, and
+it's what the demo agent in [`PLAN.md §4.3`](PLAN.md) maps to once you swap `--runner claude` for
+`--runner free-code`.
 
 ## Command reference
 
 | Command | What it does |
 |---|---|
 | `awb start` | Runs the broker in the foreground. |
-| `awb add <name> [options]` | Registers a new hook (see [Registering a hook](#registering-a-hook)). |
+| `awb add <name> [options]` | Registers a new hook (see [Registering a hook](#registering-a-hook)). `--runner <claude\|free-code>` picks which CLI a trigger hook spawns. |
 | `awb rm <name>` | Removes a hook. |
 | `awb list` | Lists all registered hooks. |
 | `awb url <name>` | Shows the URL and auth header for a hook. |
 | `awb events [name]` | Shows the most recently received events (and their status) from SQLite. |
-| `awb test <name> [--body <json>] [--session-id <id>]` | Fires a real event against the running broker, with or without `sessionId`. |
+| `awb test <name> [--body <json>] [--session-id <id>]` | Fires a real event against the running broker, with or without `sessionId` (a claude uuid or a free-code `.jsonl` path). |
 
 ---
 

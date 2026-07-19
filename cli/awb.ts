@@ -26,7 +26,13 @@ Commands:
   start                                  Run the broker (foreground)
   add <name> [options]                   Register a hook
     --trigger | --queue                  Delivery mode (default: trigger)
-    --consumer <c>                       Repeatable; default spawn:claude for trigger, queue otherwise
+    --runner <claude|free-code>          Which CLI to spawn for trigger hooks (default: claude).
+                                          Shortcut for --consumer spawn:claude|spawn:free-code.
+                                          The free-code adapter maps --permission-mode to its
+                                          --tools flag set (see below) and resumes sessions by
+                                          .jsonl path instead of a claude session uuid.
+    --consumer <c>                       Repeatable; default spawn:claude for trigger, queue otherwise.
+                                          Use spawn:free-code to wake free-code instead of claude.
     --prompt-template <text>             Prompt template for spawned agents ({{payload}}, {{hook}})
     --workdir <dir>                      cwd for spawned agent processes
     --secret <s> | --hmac-secret <s>     Auth secret (random shared secret generated if omitted)
@@ -34,17 +40,22 @@ Commands:
                                           Unset by default -- headless runs have no TTY, so any
                                           Write/Edit/Bash the model attempts is auto-denied unless
                                           you opt in here. acceptEdits is the least-risky opt-in.
-    --visible                            Run spawned claude in a visible gnome-terminal window
-                                          (streams live, closes when done) instead of hidden.
-                                          Falls back to hidden if gnome-terminal isn't installed.
+                                          For --runner free-code this is mapped to --tools:
+                                          unset→read,grep,find,ls; acceptEdits→+edit,write;
+                                          bypass/auto/dontAsk→+bash; manual/plan→read-only.
+    --visible                            Run the spawned agent (claude or free-code) in a visible
+                                          gnome-terminal window (streams live, closes when done)
+                                          instead of hidden. Falls back to hidden if
+                                          gnome-terminal isn't installed.
   rm <name>                              Remove a hook
   list                                   List hooks
   url <name>                             Show callback URL + auth header
   events [name]                          Show recently recorded events
   test <name> [--body <json>] [--session-id <id>]
                                           POST a local test event to the running broker
-                                          (with --session-id, the spawn:claude adapter will
-                                          use "claude --resume <id>" instead of "claude -p")
+                                          (with --session-id, the spawn:claude adapter resumes
+                                          that claude session and the spawn:free-code adapter
+                                          resumes the .jsonl path it points at)
 `);
 }
 
@@ -129,10 +140,24 @@ async function main(): Promise<void> {
 		}
 		const permissionMode = permissionModeArg as PermissionMode | undefined;
 		const visible = rest.includes("--visible");
+		const runnerArg = flagValue(rest, "--runner");
+		const VALID_RUNNERS = ["claude", "free-code"] as const;
+		if (runnerArg && !VALID_RUNNERS.includes(runnerArg as (typeof VALID_RUNNERS)[number])) {
+			console.error(`Invalid --runner '${runnerArg}'. Choices: ${VALID_RUNNERS.join(", ")}`);
+			process.exitCode = 1;
+			return;
+		}
+		const runner = runnerArg as (typeof VALID_RUNNERS)[number] | undefined;
+		// `--runner` is a shortcut for the spawn consumer on trigger hooks. If the
+		// caller passed --consumer explicitly that wins; otherwise pick the spawn
+		// consumer for the chosen runner (default claude). It has no effect on
+		// --queue hooks, whose default consumer stays "queue".
+		const defaultConsumers =
+			mode === "trigger" ? (runner === "free-code" ? ["spawn:free-code"] : ["spawn:claude"]) : ["queue"];
 
 		const hook: HookConfig = {
 			mode,
-			consumers: consumers.length > 0 ? consumers : mode === "trigger" ? ["spawn:claude"] : ["queue"],
+			consumers: consumers.length > 0 ? consumers : defaultConsumers,
 			...(secret ? { secret } : {}),
 			...(hmacSecret ? { hmacSecret } : {}),
 			...(promptTemplate ? { promptTemplate } : {}),
