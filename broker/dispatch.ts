@@ -12,7 +12,8 @@
  * SQLite remain the source of truth if it fails.
  */
 import { runClaude } from "../adapters/spawn-runner/claude.ts";
-import type { ClaudeRunResult } from "../adapters/spawn-runner/claude.ts";
+import { runFreeCode } from "../adapters/spawn-runner/free-code.ts";
+import type { RunResult } from "../adapters/spawn-runner/shared.ts";
 import type { HookConfig } from "./config.ts";
 import { insertEvent, markDelivered, markFailed } from "./db.ts";
 import type { WebhookEvent } from "./types.ts";
@@ -41,13 +42,15 @@ function callbackUrlFrom(event: WebhookEvent, log: Logger): URL | null {
 }
 
 /**
- * Shapes what gets POSTed to `callbackUrl`. Hidden runs use `--output-format
- * json`, so stdout is Claude's result envelope — `result` and `session_id`
- * are lifted out of it. If stdout isn't parseable JSON (visible mode logs a
- * `text` transcript through `tee`, so there's no stdout here at all), the
- * caller still gets `ok`/`exitCode` and can fall back to the broker log.
+ * Shapes what gets POSTed to `callbackUrl`. Each adapter's `stdout` is a JSON
+ * object with `result` and `session_id` — claude's `--output-format json`
+ * envelope natively, free-code's NDJSON stream reshaped by its adapter into
+ * the same shape. `result`/`session_id` are lifted out of it here. If stdout
+ * isn't parseable JSON (visible mode logs a `text` transcript through `tee`,
+ * so there's no stdout here at all), the caller still gets `ok`/`exitCode`
+ * and can fall back to the broker log.
  */
-function callbackPayload(run: ClaudeRunResult): Record<string, unknown> {
+function callbackPayload(run: RunResult): Record<string, unknown> {
 	const payload: Record<string, unknown> = { ok: run.ok, exitCode: run.exitCode, mode: run.mode };
 	if (!run.stdout) return payload;
 	try {
@@ -97,23 +100,25 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 	for (const consumer of hook.consumers) {
 		const id = insertEvent(event, consumer);
 
-		if (consumer === "spawn:claude") {
+		if (consumer === "spawn:claude" || consumer === "spawn:free-code") {
 			const key = hook.workdir ?? "default";
 			const callbackUrl = callbackUrlFrom(event, log);
+			const runner = consumer === "spawn:free-code" ? runFreeCode : runClaude;
+			const tag = consumer === "spawn:free-code" ? "free-code" : "claude";
 			runExclusive(key, async () => {
 				try {
-					const result = await runClaude(hook, event);
+					const result = await runner(hook, event);
 					if (result.ok) {
 						markDelivered(id);
-						log(`'${name}' -> claude (${result.mode}) ok, log: ${result.logFile}`);
+						log(`'${name}' -> ${tag} (${result.mode}) ok, log: ${result.logFile}`);
 					} else {
 						markFailed(id, `exit ${result.exitCode}`);
-						log(`'${name}' -> claude (${result.mode}) failed (exit ${result.exitCode}), log: ${result.logFile}`, "error");
+						log(`'${name}' -> ${tag} (${result.mode}) failed (exit ${result.exitCode}), log: ${result.logFile}`, "error");
 					}
 					if (callbackUrl) await postCallback(callbackUrl, callbackPayload(result), name, log);
 				} catch (err) {
 					markFailed(id, String(err));
-					log(`'${name}' -> claude spawn error: ${String(err)}`, "error");
+					log(`'${name}' -> ${tag} spawn error: ${String(err)}`, "error");
 					if (callbackUrl) await postCallback(callbackUrl, { ok: false, error: String(err) }, name, log);
 				}
 			});
