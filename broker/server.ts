@@ -16,6 +16,7 @@
 import * as crypto from "node:crypto";
 import * as http from "node:http";
 import type { BridgeConfig, HookConfig } from "./config.ts";
+import { killRun } from "./db.ts";
 import type { WebhookEvent } from "./types.ts";
 
 export interface ServerDeps {
@@ -90,6 +91,59 @@ export function createServer(deps: ServerDeps): http.Server {
 		const hook = cfg.hooks[name];
 		if (!hook) {
 			sendJson(res, 404, { error: "unknown_hook", name });
+			return;
+		}
+
+		// --- POST /hook/:name/abort --- kill an in-flight run by its `jobId`.
+		//
+		// Same auth as event delivery (the hook's secret / hmac over the raw
+		// body), so anything that can submit a job can also abort one. The body
+		// is `{ "jobId": "<id>" }` — the same id the caller put on the dispatch
+		// body. Returns `{ ok, killed }`: `killed: false` means there was no live
+		// run for that jobId (it already finished, or never existed) — NOT an
+		// error, since a racing completion makes that a normal outcome.
+		if (req.method === "POST" && parts[2] === "abort" && !parts[3]) {
+			const chunks: Buffer[] = [];
+			let size = 0;
+			let aborted = false;
+			req.on("data", (chunk: Buffer) => {
+				if (aborted) return;
+				size += chunk.length;
+				if (size > cfg.maxBodyBytes) {
+					aborted = true;
+					sendJson(res, 413, { error: "payload_too_large" });
+					req.destroy();
+				}
+				if (!aborted) chunks.push(chunk);
+			});
+			req.on("end", () => {
+				if (aborted) return;
+				const rawBody = Buffer.concat(chunks);
+				if (!verifyAuth(hook, req.headers, rawBody)) {
+					deps.log(`hook '${name}': abort authentication failed`, "warning");
+					sendJson(res, 401, { error: "unauthorized" });
+					return;
+				}
+				let jobId = "";
+				try {
+					const parsed = JSON.parse(rawBody.toString("utf8") || "{}") as Record<string, unknown>;
+					if (typeof parsed.jobId === "string") jobId = parsed.jobId;
+				} catch {
+					// malformed body → empty jobId, handled below
+				}
+				if (!jobId) {
+					sendJson(res, 400, { error: "missing_jobId" });
+					return;
+				}
+				void (async () => {
+					const killed = await killRun(name, jobId);
+					deps.log(`hook '${name}': abort jobId='${jobId}' → ${killed ? "killed" : "no live run"}`);
+					sendJson(res, 200, { ok: true, killed });
+				})();
+			});
+			req.on("error", () => {
+				if (!aborted) sendJson(res, 400, { error: "bad_request" });
+			});
 			return;
 		}
 

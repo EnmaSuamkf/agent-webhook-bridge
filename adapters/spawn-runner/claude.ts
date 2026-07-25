@@ -16,14 +16,14 @@ import * as path from "node:path";
 import { logsDir } from "../../broker/config.ts";
 import type { HookConfig } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
-import { renderPrompt, runHidden, runVisible, type RunResult } from "./shared.ts";
+import { renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 /** Alias kept so external callers that imported the old name keep compiling. */
 export type ClaudeRunResult = RunResult;
 
 const BINARY = "claude";
 
-export function runClaude(hook: HookConfig, event: WebhookEvent): Promise<RunResult> {
+export function runClaude(hook: HookConfig, event: WebhookEvent, onSpawn?: SpawnHook, onStarted?: StartedHook): Promise<RunResult> {
 	const prompt = renderPrompt(hook, event);
 	const sessionId = event.headers.sessionid;
 	const mode: "resume" | "new" = sessionId ? "resume" : "new";
@@ -46,11 +46,11 @@ export function runClaude(hook: HookConfig, event: WebhookEvent): Promise<RunRes
 	fs.mkdirSync(logsDir(), { recursive: true });
 	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
 
-	if (hook.visible) return runVisible(args, BINARY, cwd, mode, logFile);
+	if (hook.visible) return runVisible(args, BINARY, cwd, mode, logFile, onSpawn, onStarted);
 
 	// Hidden mode: Node owns the log file directly, so the header is written
 	// here up front (there's no terminal shell to print its own).
 	const logStream = fs.createWriteStream(logFile, { flags: "a" });
 	logStream.write(`$ ${BINARY} ${args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-	return runHidden(args, BINARY, cwd, mode, logFile, logStream);
+	return runHidden(args, BINARY, cwd, mode, logFile, logStream, onSpawn, onStarted);
 }

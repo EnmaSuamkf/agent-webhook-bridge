@@ -18,6 +18,8 @@ This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapte
 - [Registering a hook](#registering-a-hook)
 - [New session vs. resuming (`sessionId`)](#new-session-vs-resuming-sessionid)
 - [Result callback (`callbackUrl`)](#result-callback-callbackurl)
+- [Started callback (`startedCallbackUrl`) and workdir serialization](#started-callback-startedcallbackurl-and-workdir-serialization)
+- [Aborting an in-flight run (`jobId` + `POST /hook/<name>/abort`)](#aborting-an-in-flight-run-jobid--post-hooknameabort)
 - [Permissions in headless mode](#permissions-in-headless-mode)
 - [Visible mode](#visible-mode)
 - [Examples](#examples)
@@ -106,7 +108,7 @@ Prompt:     A CI build failed. Log:\n\n{{payload}}\n\nInvestigate the cause.
 | `--runner <claude\|free-code>` | Which CLI a `trigger` hook spawns. Default: `claude`. Shortcut for `--consumer spawn:claude` / `--consumer spawn:free-code`; an explicit `--consumer` wins. The two adapters share the same hook protocol (secret, `callbackUrl`, `sessionId`), so the broker and callers don't change — only the binary that gets spawned does. See [free-code adapter](#free-code-adapter) for the session/permission differences. |
 | `--consumer <c>` | Repeatable. Default: `spawn:claude` for `trigger` (or `spawn:free-code` when `--runner free-code`), `queue` for `queue`. Use `spawn:free-code` to wake [free-code](https://github.com/EnmaSuamkf/free-code) instead of Claude Code. |
 | `--prompt-template <text>` | Template for the prompt the spawned agent receives. `{{payload}}` is replaced with the event body (formatted as JSON if it isn't plain text); `{{hook}}` with the hook's name. |
-| `--workdir <dir>` | `cwd` of the spawned process. It's also the key that serializes runs: two events with the same `workdir` never run in parallel on the same repo. |
+| `--workdir <dir>` | `cwd` of the spawned process. It's also the key that serializes runs: two events with the same `workdir` never run in parallel on the same repo — the lock (`flock`) is held by the spawned process itself, so it survives a broker restart. See [Started callback and workdir serialization](#started-callback-startedcallbackurl-and-workdir-serialization). |
 | `--secret <s>` / `--hmac-secret <s>` | Authentication. If you don't provide either, a random one is generated. With `--hmac-secret` the caller signs the raw body instead of sending the secret in a header. |
 | `--permission-mode <mode>` | For `--runner claude` this is passed straight through as claude's `--permission-mode` (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`). For `--runner free-code` it's mapped to that adapter's `--tools` flag (see [Permissions in headless mode](#permissions-in-headless-mode)). Without this, headless runs can't write or edit anything. |
 | `--visible` | Runs the spawned agent (`claude` or `free-code`) in a visible gnome-terminal window instead of hidden (see [Visible mode](#visible-mode)). |
@@ -280,6 +282,50 @@ When the spawned run finishes, the broker POSTs the outcome to that URL as JSON:
   same as for inbound webhooks.
 - Visible mode (`--visible`) captures no stdout (the output goes to the terminal via `tee`), so
   its callbacks carry `ok`/`exitCode` but no `result` — use hidden mode for automation loops.
+
+### Started callback (`startedCallbackUrl`) and workdir serialization
+
+A dispatched run may not start immediately: runs are **serialized per `workdir`**
+with a file lock (`flock`), so a second event on the same `workdir` waits behind
+the first. Include a `startedCallbackUrl` (same loopback-only rules as
+`callbackUrl`) to learn when the run *actually begins* — the broker POSTs
+`{"started":true}` to it the instant the workdir lock is acquired, right before
+the agent binary is `exec`'d. That's the true run start, not the `POST /hook`
+acceptance (which only means "queued"). An orchestrator that times out runs
+(e.g. the AgentMesh hub) uses this to start the clock fairly, so a run queued
+behind a long one isn't timed out while still waiting its turn.
+
+The lock is held by the spawned process group itself (inherited file
+descriptor), so it **survives a broker restart**: an orphaned child from a
+dead broker keeps holding the lock, and a new broker's run for that `workdir`
+blocks on it until the orphan exits — in-memory queues can't give that
+guarantee. Lockfiles live under `~/.agent-webhook-bridge/locks/<sha1(cwd)>.lock`,
+never inside the workdir. `flock` is only used in hidden mode (visible runs are
+interactive and operator-paced); on platforms without `flock` the spawn falls
+back to an unwrapped run (same as before this feature).
+
+### Aborting an in-flight run (`jobId` + `POST /hook/<name>/abort`)
+
+If the caller tags each event with a `jobId` (any string), the broker records
+the spawned process-group leader pid keyed by `(hook, jobId)` in its SQLite
+DB. `POST /hook/<name>/abort` with the hook's auth and body `{"jobId":"…"}`
+then SIGTERMs (then SIGKILLs after a 3s grace) the whole process group —
+`flock`, the bash shim, and the agent binary — which is what actually frees the
+workdir lock for the next run. The response is `{"ok":true,"killed":<bool>}`:
+`killed:false` means there was no live run for that jobId (it already finished,
+or never existed) — not an error, since a racing completion makes that normal.
+Rows are reaped when the run finishes or when a lookup finds the pid already
+dead, so the table doesn't grow unbounded. Persisting the pid (not keeping it
+in memory) means a **broker restart** can still abort a run the previous
+broker instance spawned. Plain `curl` callers without a `jobId` simply aren't
+abortable by id — everything else is unaffected.
+
+```bash
+curl -X POST http://127.0.0.1:8890/hook/mesh-worker/abort \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: <secret>" \
+  -d '{"jobId":"job-001"}'
+```
 
 ## Permissions in headless mode
 
