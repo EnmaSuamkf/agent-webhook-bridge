@@ -9,8 +9,10 @@
  * drift apart on the parts that are identical between CLIs.
  */
 import { spawn } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import type { HookConfig } from "../../broker/config.ts";
+import * as path from "node:path";
+import { bridgeDir, type HookConfig } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 
 /**
@@ -40,15 +42,64 @@ export interface RunResult {
 const MAX_STDOUT_CAPTURE = 4 * 1024 * 1024;
 
 /**
+ * `flock` (util-linux) binary, located once at module load. Hidden runs wrap
+ * the spawn in `flock <lockfile> bash -c '… exec "$@"' bash <binary> <args>`
+ * so the workdir lock is held by the agent process itself (via the inherited
+ * fd), which means it SURVIVES a broker restart: an orphaned child from a dead
+ * broker keeps holding the lock, and a new broker's run for the same workdir
+ * blocks on it until the orphan exits — the in-memory `workdirChains` queue in
+ * dispatch.ts can't give that guarantee on its own. null on platforms without
+ * `flock` (then we fall back to an unwrapped spawn, i.e. no cross-restart
+ * serialization — same as the pre-flock behaviour, never worse). Visible mode
+ * is left unwrapped on purpose (see `runVisible`).
+ */
+const FLOCK = ["/usr/bin/flock", "/bin/flock", "/usr/local/bin/flock"].find((p) => {
+	try {
+		return fs.existsSync(p);
+	} catch {
+		return false;
+	}
+}) ?? null;
+
+/**
+ * Marker the hidden-mode wrapper writes to fd 3 the instant `flock` has
+ * acquired the workdir lock (right before `exec`-ing the agent binary). The
+ * broker reads it off fd 3 to fire the `started` callback at the true moment
+ * the run begins — NOT at spawn time, which would be too early when the run is
+ * queued behind another on the same workdir. Kept short and unique enough that
+ * a coincidental match in the binary's own (separate) stdout stream is not a
+ * concern: this only travels on fd 3, which the binary never writes to.
+ */
+const STARTED_MARKER = "AWB_STARTED\n";
+
+/** `echo <marker> >&3; exec 3>&-; exec "$@"` — print the marker, close fd 3, replace with the agent binary. */
+const HIDDEN_STARTED_SCRIPT = `echo ${STARTED_MARKER.trim()} >&3 2>/dev/null; exec 3>&- 2>/dev/null; exec "$@"`;
+
+/**
+ * Persistent workdir lock file for `cwd`. Kept OUTSIDE the workdir (under
+ * `~/.agent-webhook-bridge/locks/<sha1(cwd)>.lock`) so it never pollutes a
+ * real repo's working tree, while still keying on the absolute cwd so two
+ * hooks on the same workdir share a lockfile and two on different workdirs
+ * get distinct ones.
+ */
+function lockFileFor(cwd: string): string {
+	const hash = crypto.createHash("sha1").update(path.resolve(cwd)).digest("hex").slice(0, 16);
+	const dir = path.join(bridgeDir(), "locks");
+	fs.mkdirSync(dir, { recursive: true });
+	return path.join(dir, `${hash}.lock`);
+}
+
+/**
  * Builds the prompt string from the hook's template and the event body.
- * `callbackUrl` is broker plumbing (consumed by dispatch to report the
- * result), not task content — leaving it in {{payload}} makes the spawned
- * agent try to POST it itself, and headless runs can't.
+ * `callbackUrl`, `startedCallbackUrl` and `jobId` are broker plumbing
+ * (consumed by dispatch to report the result / the run's start / to abort),
+ * not task content — leaving them in {{payload}} makes the spawned agent try
+ * to POST them itself or quote them back, and headless runs can't.
  */
 export function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
 	let body = event.body;
-	if (typeof body === "object" && body !== null && "callbackUrl" in body) {
-		const { callbackUrl: _, ...rest } = body as Record<string, unknown>;
+	if (typeof body === "object" && body !== null) {
+		const { callbackUrl: _, startedCallbackUrl: __, jobId: ___, ...rest } = body as Record<string, unknown>;
 		body = rest;
 	}
 	const payload = typeof body === "string" ? body : JSON.stringify(body, null, 2);
@@ -56,11 +107,28 @@ export function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
 	return template.replaceAll("{{payload}}", payload).replaceAll("{{hook}}", event.hook);
 }
 
+/** Notified once the spawned process group leader exists (its pid), so dispatch can register it for abort. */
+export type SpawnHook = (pid: number) => void;
+
+/** Notified when the run has actually begun — for hidden runs with `flock`, that's after the workdir lock is acquired (the fd-3 marker), not at spawn. */
+export type StartedHook = () => void;
+
 /**
  * Runs `binary args` hidden, stdout/stderr piped straight to the log file.
  * `logStream` is opened by the caller so it can write a header line first;
  * this function closes it when the process exits. The captured stdout (up to
  * MAX_STDOUT_CAPTURE bytes) is returned for the adapter to reshape/forward.
+ *
+ * When `flock` is available the spawn is wrapped in
+ * `flock <lockfile> bash -c 'echo AWB_STARTED >&3; exec 3>&-; exec "$@"' bash <binary> <args>`:
+ * `flock` holds the workdir lock for the run's lifetime (surviving broker
+ * restarts), `bash` writes the STARTED marker to fd 3 once the lock is held,
+ * then `exec` replaces it with the agent binary (args forwarded literally via
+ * `"$@"`, so attacker-controlled prompt text is never interpreted by a shell).
+ * The child runs `detached` in its own process group so `process.kill(-pid)`
+ * reaches `flock`+`bash`+the binary together — that's what frees the workdir
+ * on abort. `onSpawn` fires at spawn (the flock pid, = the group leader);
+ * `onStarted` fires when the fd-3 marker arrives (the real run start).
  */
 export function runHidden(
 	args: string[],
@@ -69,18 +137,54 @@ export function runHidden(
 	mode: "resume" | "new",
 	logFile: string,
 	logStream: fs.WriteStream,
+	onSpawn?: SpawnHook,
+	onStarted?: StartedHook,
 ): Promise<RunResult> {
 	return new Promise((resolve) => {
-		const child = spawn(binary, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const useFlock = FLOCK !== null;
+		const lockfile = useFlock ? lockFileFor(cwd) : null;
+		// fd layout when wrapped: 0 ignore, 1 stdout (binary), 2 stderr (binary),
+		// 3 the STARTED marker pipe (bash writes once, then closes before exec).
+		const stdio: Array<"ignore" | "pipe"> = useFlock ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"];
+		const child = useFlock
+			? spawn(FLOCK as string, [lockfile as string, "bash", "-c", HIDDEN_STARTED_SCRIPT, "bash", binary, ...args], {
+					cwd,
+					stdio,
+					detached: true,
+				})
+			: spawn(binary, args, { cwd, stdio, detached: true });
+		onSpawn?.(child.pid as number);
+
+		if (useFlock) {
+			const startedPipe = child.stdio[3] as unknown as
+				| { on(event: "data", listener: (chunk: Buffer) => void): unknown; once?(event: "close", listener: () => void): unknown }
+				| null;
+			let fired = false;
+			const fireStarted = (): void => {
+				if (!fired) {
+					fired = true;
+					onStarted?.();
+				}
+			};
+			startedPipe?.on("data", (chunk: Buffer) => {
+				if (chunk.toString("utf8").includes(STARTED_MARKER.trim())) fireStarted();
+			});
+			// If `flock` exits before emitting a marker (e.g. it couldn't acquire the
+			// lock and errored), `close` still settles the run below; no stale start.
+		} else if (onStarted) {
+			// No flock → no lock to wait on; the binary starts right away.
+			onStarted();
+		}
+
 		const stdoutChunks: Buffer[] = [];
 		let stdoutSize = 0;
-		child.stdout.on("data", (chunk: Buffer) => {
+		child.stdout?.on("data", (chunk: Buffer) => {
 			if (stdoutSize >= MAX_STDOUT_CAPTURE) return;
 			stdoutChunks.push(chunk);
 			stdoutSize += chunk.length;
 		});
-		child.stdout.pipe(logStream, { end: false });
-		child.stderr.pipe(logStream, { end: false });
+		child.stdout?.pipe(logStream, { end: false });
+		child.stderr?.pipe(logStream, { end: false });
 		child.on("close", (exitCode) => {
 			logStream.end();
 			const stdout = Buffer.concat(stdoutChunks).toString("utf8");
@@ -116,6 +220,15 @@ const VISIBLE_SCRIPT =
  * `$@`), never interpolated into the shell script string -- an
  * attacker-controlled prompt containing `` ` ``/`$()`/`;` etc. is inert data,
  * not executed. Falls back to `runHidden` if gnome-terminal isn't installed.
+ *
+ * Visible mode is NOT wrapped in `flock`: it's an interactive, operator-watched
+ * path where cross-restart serialization doesn't apply (a visible window from a
+ * dead broker is already gone), and gnome-terminal's fork behaviour would
+ * release an outer lock early. Serialization within one broker still holds via
+ * dispatch's in-memory `workdirChains`. `onSpawn` fires at spawn (the
+ * gnome-terminal pid, for abort); `onStarted` fires at spawn too (best-effort —
+ * visible mode can't observe lock acquisition the way the fd-3 marker does for
+ * hidden runs, and visible runs aren't the contended-workdir bug).
  */
 export function runVisible(
 	args: string[],
@@ -123,6 +236,8 @@ export function runVisible(
 	cwd: string,
 	mode: "resume" | "new",
 	logFile: string,
+	onSpawn?: SpawnHook,
+	onStarted?: StartedHook,
 ): Promise<RunResult> {
 	return new Promise((resolve) => {
 		const child = spawn(
@@ -138,8 +253,13 @@ export function runVisible(
 				binary,
 				...args,
 			],
-			{ cwd, env: { ...process.env, AWB_LOGFILE: logFile }, stdio: "ignore" },
+			{ cwd, env: { ...process.env, AWB_LOGFILE: logFile }, stdio: "ignore", detached: true },
 		);
+		onSpawn?.(child.pid as number);
+		// Best-effort: visible mode has no fd-3 channel back, so report start at
+		// spawn time. The contended-workdir fairness fix (option c) targets the
+		// hidden dispatch path; visible runs are interactive and operator-paced.
+		onStarted?.();
 		child.on("close", (exitCode) => {
 			resolve({ ok: exitCode === 0, mode, exitCode, logFile });
 		});
@@ -147,7 +267,7 @@ export function runVisible(
 			const logStream = fs.createWriteStream(logFile, { flags: "a" });
 			logStream.write(`gnome-terminal unavailable (${String(err)}), falling back to hidden run\n`);
 			logStream.write(`$ ${binary} ${args.join(" ")}\ncwd: ${cwd}\n\n`);
-			runHidden(args, binary, cwd, mode, logFile, logStream).then(resolve);
+			runHidden(args, binary, cwd, mode, logFile, logStream, onSpawn, onStarted).then(resolve);
 		});
 	});
 }

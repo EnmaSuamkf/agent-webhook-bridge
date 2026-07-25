@@ -14,8 +14,9 @@
 import { runClaude } from "../adapters/spawn-runner/claude.ts";
 import { runFreeCode } from "../adapters/spawn-runner/free-code.ts";
 import type { RunResult } from "../adapters/spawn-runner/shared.ts";
+import type { SpawnHook, StartedHook } from "../adapters/spawn-runner/shared.ts";
 import type { HookConfig } from "./config.ts";
-import { insertEvent, markDelivered, markFailed } from "./db.ts";
+import { insertEvent, markDelivered, markFailed, registerRun, unregisterRun } from "./db.ts";
 import type { WebhookEvent } from "./types.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -23,22 +24,34 @@ export type Logger = (message: string, type?: "info" | "warning" | "error") => v
 const CALLBACK_TIMEOUT_MS = 10_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
-function callbackUrlFrom(event: WebhookEvent, log: Logger): URL | null {
+function loopbackUrlFrom(event: WebhookEvent, field: string, log: Logger): URL | null {
 	if (typeof event.body !== "object" || event.body === null) return null;
-	const raw = (event.body as Record<string, unknown>).callbackUrl;
+	const raw = (event.body as Record<string, unknown>)[field];
 	if (typeof raw !== "string") return null;
 	let url: URL;
 	try {
 		url = new URL(raw);
 	} catch {
-		log(`'${event.hook}': ignoring malformed callbackUrl`, "warning");
+		log(`'${event.hook}': ignoring malformed ${field}`, "warning");
 		return null;
 	}
 	if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname)) {
-		log(`'${event.hook}': ignoring non-loopback callbackUrl (${url.origin})`, "warning");
+		log(`'${event.hook}': ignoring non-loopback ${field} (${url.origin})`, "warning");
 		return null;
 	}
 	return url;
+}
+
+/**
+ * The job id the caller (e.g. the hub) attached to this event, used to key the
+ * in-flight run row so a later `POST /hook/:name/abort {jobId}` can kill it.
+ * Absent for callers that don't use the abort protocol (plain `curl`); those
+ * runs just aren't abortable by id, everything else is unaffected.
+ */
+function jobIdFrom(event: WebhookEvent): string | null {
+	if (typeof event.body !== "object" || event.body === null) return null;
+	const raw = (event.body as Record<string, unknown>).jobId;
+	return typeof raw === "string" && raw !== "" ? raw : null;
 }
 
 /**
@@ -85,6 +98,31 @@ async function postCallback(url: URL, payload: unknown, hook: string, log: Logge
 	log(`'${hook}': callback gave up after 2 attempts — see the run log for the result`, "error");
 }
 
+/**
+ * One-shot best-effort POST of `{started: true}` to the caller's
+ * `startedCallbackUrl`, fired the moment the run actually begins (after the
+ * workdir lock is acquired — see `runHidden`). The hub uses it to flip a
+ * `queued` step to `running` and start its timeout clock at the true run start
+ * instead of at dispatch acceptance, so a step queued behind another on the
+ * same workdir isn't timed out while still waiting. Never retried: a missed
+ * start just means the hub keeps the step `queued` (abortable, and eventually
+ * failed by the hub's queued-timeout safety net).
+ */
+async function postStarted(url: URL, hook: string, log: Logger): Promise<void> {
+	try {
+		const res = await fetch(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ started: true }),
+			redirect: "error",
+			signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
+		});
+		if (!res.ok) log(`'${hook}': started callback got ${res.status}`, "warning");
+	} catch (err) {
+		log(`'${hook}': started callback failed: ${String(err)}`, "warning");
+	}
+}
+
 const workdirChains = new Map<string, Promise<void>>();
 
 function runExclusive(key: string, task: () => Promise<void>): void {
@@ -102,12 +140,27 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 
 		if (consumer === "spawn:claude" || consumer === "spawn:free-code") {
 			const key = hook.workdir ?? "default";
-			const callbackUrl = callbackUrlFrom(event, log);
+			const callbackUrl = loopbackUrlFrom(event, "callbackUrl", log);
+			const startedUrl = loopbackUrlFrom(event, "startedCallbackUrl", log);
+			const jobId = jobIdFrom(event);
 			const runner = consumer === "spawn:free-code" ? runFreeCode : runClaude;
 			const tag = consumer === "spawn:free-code" ? "free-code" : "claude";
+			// Register the spawned process group leader so an external abort
+			// (`POST /hook/:name/abort {jobId}`) can kill the whole group — flock,
+			// the bash shim, and the agent binary — which is what actually frees
+			// the workdir. Only keyed when the caller sent a `jobId` (the hub
+			// always does); otherwise there's nothing to abort by id.
+			const onSpawn: SpawnHook = (pid) => {
+				if (jobId) registerRun(name, jobId, pid);
+			};
+			// Fire the `started` callback at the true run start (after the workdir
+			// lock is acquired), so the hub can begin the step's timeout then.
+			const onStarted: StartedHook = () => {
+				if (startedUrl) void postStarted(startedUrl, name, log);
+			};
 			runExclusive(key, async () => {
 				try {
-					const result = await runner(hook, event);
+					const result = await runner(hook, event, onSpawn, onStarted);
 					if (result.ok) {
 						markDelivered(id);
 						log(`'${name}' -> ${tag} (${result.mode}) ok, log: ${result.logFile}`);
@@ -120,6 +173,10 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 					markFailed(id, String(err));
 					log(`'${name}' -> ${tag} spawn error: ${String(err)}`, "error");
 					if (callbackUrl) await postCallback(callbackUrl, { ok: false, error: String(err) }, name, log);
+				} finally {
+					// The run is done (or died) — drop its row so a later abort for
+					// this jobId is a clean no-op instead of killing a recycled pid.
+					if (jobId) unregisterRun(name, jobId);
 				}
 			});
 			continue;
