@@ -1,0 +1,44 @@
+# Runs the repo's own test suite on every pull request and on pushes to main.
+#
+# The suite is `node --test`, and every test file in it is TypeScript. Node
+# only discovers and runs `.ts` test files on a version new enough to strip
+# types natively (this repo's `engines` says >=24). On an older Node the run
+# does NOT fail — it reports "tests 0" and exits 0, i.e. a green check that
+# tested nothing. That is why the Node version is pinned here and then
+# asserted before the tests run.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    # No typecheck step: package.json has no typecheck script and typescript is
+    # not a dependency, so there is nothing here to run without also changing
+    # package.json and the lockfile. Add one here when the repo grows one.
+    name: Broker tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `engines.node` is >=24 and the test runner silently finds nothing below
+      # that, so make a wrong runtime a loud failure instead of a false pass.
+      - name: Assert Node satisfies engines.node (>=24)
+        run: |
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          echo "node $(node --version)"
+          test "$major" -ge 24 || { echo "::error::Node >=24 required, got $(node --version)"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test

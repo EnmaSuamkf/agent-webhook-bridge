@@ -35,6 +35,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { bridgeDir, logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
+import { wrapForSandbox } from "./sandbox.ts";
 import { renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 const BINARY = "free-code";
@@ -169,13 +170,20 @@ export function runFreeCode(hook: HookConfig, event: WebhookEvent, onSpawn?: Spa
 	fs.mkdirSync(logsDir(), { recursive: true });
 	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
 
-	if (hook.visible) return runVisible(args, BINARY, cwd, mode, logFile, onSpawn, onStarted);
+	// Same sandbox rewrite as the claude adapter (see sandbox.ts): unchanged
+	// without a `sandbox` block, `docker run --rm … free-code …` with one. The
+	// session .jsonl is under the bridge dir, which sandbox.ts mounts at its
+	// own absolute path — so the path we hand back as `session_id` resolves
+	// identically on the host and in the container, and resume keeps working.
+	const run = wrapForSandbox(BINARY, args, hook);
+
+	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted);
 
 	// Hidden mode: Node owns the log file directly, so the header is written
 	// here up front (there's no terminal shell to print its own).
 	const logStream = fs.createWriteStream(logFile, { flags: "a" });
-	logStream.write(`$ ${BINARY} ${args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-	return runHidden(args, BINARY, cwd, mode, logFile, logStream, onSpawn, onStarted).then((result) => {
+	logStream.write(`$ ${run.binary} ${run.args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
+	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted).then((result) => {
 		// Turn the NDJSON stream into the {result, session_id} envelope. If the
 		// spawn itself failed (no stdout at all), leave stdout unset so the
 		// callback falls back to {ok:false, exitCode, mode} exactly like claude.
