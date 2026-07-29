@@ -22,6 +22,49 @@ export const PERMISSION_MODES: PermissionMode[] = [
 	"plan",
 ];
 
+/**
+ * Where a hook's agent runs. Absent from a hook means the historical
+ * behaviour — spawn the CLI directly on the host, as your user, on your real
+ * filesystem — so every hooks.json written before this existed stays valid.
+ *
+ * `kind: "docker"` runs the very same argv inside `docker run --rm` instead,
+ * with the hook's workdir bind-mounted at its own absolute path (the paths
+ * must be identical inside and outside, or the caller can no longer find the
+ * transcripts the harness writes). See adapters/spawn-runner/sandbox.ts for
+ * the argv this turns into, and why each flag is there.
+ */
+export interface DockerSandbox {
+	kind: "docker";
+	/** Image to run the agent CLI in. Per hook on purpose: a Python repo and a Node repo want different toolchains. */
+	image: string;
+	/** `--user` value. Defaults to the broker's own uid:gid, so files the agent creates in the workdir are owned by the operator, not root. */
+	user?: string;
+	/** Extra environment: `"NAME"` forwards the broker's own value, `"NAME=value"` sets one outright. */
+	env?: string[];
+	/** Extra host paths to bind-mount, each at its own absolute path. Every entry is a hole in the sandbox — the workdir and harness state are mounted already. */
+	mounts?: string[];
+	/** `--memory` (default `SANDBOX_LIMITS.memory`). */
+	memory?: string;
+	/** `--cpus` (default `SANDBOX_LIMITS.cpus`). */
+	cpus?: string;
+	/** `--pids-limit` (default `SANDBOX_LIMITS.pidsLimit`). */
+	pidsLimit?: number;
+}
+
+export type SandboxConfig = DockerSandbox;
+
+/**
+ * Resource caps applied to every sandboxed run unless the hook overrides
+ * them. The main defence against a runaway agent: without them a container
+ * can take the whole machine down with it, which is a worse failure than the
+ * host spawn it replaced.
+ */
+export const SANDBOX_LIMITS = {
+	memory: "4g",
+	cpus: "2",
+	pidsLimit: 512,
+} as const;
+
 export interface HookConfig {
 	mode: HookMode;
 	/** Shared secret expected in the X-Webhook-Secret header. */
@@ -48,6 +91,14 @@ export interface HookConfig {
 	 * end). Falls back to hidden if gnome-terminal isn't installed.
 	 */
 	visible?: boolean;
+	/**
+	 * Where the spawned agent runs. Unset (the default) = directly on the
+	 * host, exactly as before. Set to a docker sandbox and the same argv is
+	 * wrapped in `docker run --rm` by `wrapForSandbox`. Orthogonal to
+	 * `consumers`: the consumer picks WHICH CLI runs, this picks WHERE, so
+	 * both spawn adapters get containment from the same code.
+	 */
+	sandbox?: SandboxConfig;
 }
 
 export interface BridgeConfig {
