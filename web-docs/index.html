@@ -202,6 +202,7 @@
           <a href="#security">Security</a>
           <a href="#current-limitations">Current limitations</a>
           <a href="#free-code-adapter">free-code adapter</a>
+          <a href="#docker-sandbox">Docker sandbox</a>
           <a href="#command-reference">Command reference</a>
         </nav>
       </header>
@@ -211,6 +212,7 @@
         <ul>
           <li><strong>Node.js 24 or newer.</strong> The broker uses <code>node:sqlite</code> (no native dependencies) and runs the <code>.ts</code> files directly — there's no build step.</li>
           <li><strong>Claude Code CLI</strong> <em>and/or</em> <strong>free-code CLI</strong> installed and authenticated, with the <code>claude</code> and/or <code>free-code</code> binary on the <code>PATH</code> of the machine where the broker runs. A hook spawns whichever one its <code>--runner</code> selects (default <code>claude</code>), so you only need the binary/ies you actually use.</li>
+          <li><strong>Docker</strong>, but only if you give a hook a <code>sandbox</code> block (see <a href="#docker-sandbox">Docker sandbox</a>). Hooks without one spawn on the host as they always have and need nothing extra — the <code>docker</code> binary is never invoked.</li>
         </ul>
       </section>
 
@@ -266,6 +268,12 @@ Prompt:     A CI build failed. Log:\n\n{{payload}}\n\nInvestigate the cause.</co
             </tbody>
           </table>
         </div>
+        <p>
+          One thing a hook can carry that <code>awb add</code> has no flag for yet: an optional
+          <code>sandbox</code> block, which runs the spawned agent inside a container instead of
+          directly on the host. It's edited into <code>hooks.json</code> — see
+          <a href="#docker-sandbox">Docker sandbox</a>.
+        </p>
 
         <h3>The <code>curl</code> body is yours, not a fixed format</h3>
         <p>
@@ -627,6 +635,7 @@ awb events ci-failures</code></pre>
           <li>The server only listens on <code>127.0.0.1</code> — not exposed on the network by default.</li>
           <li>Authentication is mandatory per hook: a hook with neither <code>secret</code> nor <code>hmacSecret</code> configured never authenticates any request.</li>
           <li>For sources that don't run on the same machine (GitHub webhooks, Flowise on another host), put the broker behind a tunnel (<code>cloudflared</code>/<code>ngrok</code>) and prefer <code>hmacSecret</code> over a plain shared secret.</li>
+          <li>A hook's <code>permissionMode</code> bounds what the agent is <em>allowed</em> to do; its optional <code>sandbox</code> block bounds what it can <em>reach</em>. With <code>bypassPermissions</code> on the host that's your whole machine — inside a <a href="#docker-sandbox">Docker sandbox</a> it's the container and its mounts, and the mounts always come from the hook, never from the event body.</li>
           <li>Payloads are stored as-is in <code>events.db</code> — if the external source can include tokens or secrets in the body (CI logs, for example), keep that in mind before sharing that database.</li>
         </ul>
       </section>
@@ -655,6 +664,68 @@ awb events ci-failures</code></pre>
           <li>The adapter passes <code>--no-extensions --no-skills --no-prompt-templates --no-themes --no-rag-server</code> so a sandbox workdir with untrusted job input can't make free-code discover and run code from local skills/extensions it finds there.</li>
         </ul>
         <p>This is the runtime the AgentMesh concept paper had in mind for the single-operator bridge, and it's what the demo agent in <code>PLAN.md §4.3</code> maps to once you swap <code>--runner claude</code> for <code>--runner free-code</code>.</p>
+      </section>
+
+      <section id="docker-sandbox">
+        <h2>Docker sandbox</h2>
+        <p>The spawn adapter separates <em>what</em> to run from <em>how</em> to run it, so containment slots in as a rewrite of the command instead of a second code path. A hook can carry an optional <code>sandbox</code> block; when it does, the exact argv the adapter had already built — <code>claude …</code> or <code>free-code …</code>, whichever the runner picked — is re-expressed as a <code>docker run --rm …</code> invocation. Without the block the pair comes back byte-identical, so every <code>hooks.json</code> written before this existed keeps behaving exactly as it did.</p>
+        <p>This is the sibling of <code>--runner</code>: the runner picks <strong>which</strong> CLI a hook spawns, the sandbox picks <strong>where</strong> it spawns. Both adapters get containment from the same code.</p>
+        <p>There's no <code>awb add</code> flag for it yet — the block is a field on the hook in <code>~/.agent-webhook-bridge/hooks.json</code>, added by hand (or written for you by a caller like <a href="https://github.com/EnmaSuamkf/target">The Target Project</a>, which exposes it as a per-workflow choice):</p>
+        <pre><code>{
+  "hooks": {
+    "ci-failures": {
+      "mode": "trigger",
+      "consumers": ["spawn:claude"],
+      "workdir": "/home/you/repo",
+      "permissionMode": "bypassPermissions",
+      "sandbox": {
+        "kind": "docker",
+        "image": "target-agent:latest"
+      }
+    }
+  }
+}</code></pre>
+        <p>An event on that hook then spawns this instead of a bare <code>claude</code>:</p>
+        <pre><code>docker run --rm --init \
+  --user 1000:1000 --memory 4g --cpus 2 --pids-limit 512 \
+  -v /home/you/repo:/home/you/repo \
+  -v /home/you/.claude:/home/you/.claude \
+  -v /home/you/.claude.json:/home/you/.claude.json \
+  -v /home/you/.agent-webhook-bridge/sessions:/home/you/.agent-webhook-bridge/sessions \
+  -e HOME=/home/you \
+  -w /home/you/repo \
+  target-agent:latest \
+  claude --resume &lt;id&gt; -p "&lt;prompt&gt;" --output-format json --permission-mode bypassPermissions</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Field</th><th>What it does</th></tr></thead>
+            <tbody>
+              <tr><td><code>kind</code></td><td>Required, and <code>"docker"</code> is the only value today. Anything else is treated as "no sandbox" rather than as an error, so a hook from a newer version doesn't take the broker down.</td></tr>
+              <tr><td><code>image</code></td><td>Required. The image the agent CLI runs in. Per hook on purpose: a Python repo and a Node repo want different toolchains, and the image has to contain the <code>claude</code>/<code>free-code</code> binary the hook's runner names.</td></tr>
+              <tr><td><code>user</code></td><td><code>--user</code> value. Defaults to the broker's own <code>uid:gid</code>, so files the agent creates in the bind-mounted workdir belong to you and not to root (root-owned files in a real checkout need <code>sudo</code> to clean up). Omitted entirely on platforms with no POSIX ids rather than guessed.</td></tr>
+              <tr><td><code>env</code></td><td>Extra environment. <code>"NAME"</code> forwards the broker's own value; <code>"NAME=value"</code> sets one outright. <code>HOME</code> is already set for you, to the host home whose <code>.claude</code> was mounted.</td></tr>
+              <tr><td><code>mounts</code></td><td>Extra host paths to bind-mount, each at its own absolute path. The workdir and the harness state are mounted already — every entry here is an extra hole in the sandbox.</td></tr>
+              <tr><td><code>memory</code> / <code>cpus</code> / <code>pidsLimit</code></td><td>Resource caps, defaulting to <code>4g</code>, <code>2</code> and <code>512</code>. Without them a runaway agent can take the whole machine down with it, which is a worse failure than the host spawn it replaced.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>The broker stays on the host</h3>
+        <p>Only the process boundary around the agent CLI changes. The broker still spawns from the host, still holds the <code>flock</code> on the workdir, still owns the log file under <code>~/.agent-webhook-bridge/logs/</code>, still posts the <code>callbackUrl</code> itself. So a host hook and a docker hook pointed at the same repo still serialize against each other; <code>--init</code> gives the container a PID 1 that forwards the <code>SIGTERM</code> an abort sends, so killing a run still kills what's inside; and the container needs outbound internet for the model API and nothing else — no published port, no <code>--network host</code>, no route back to whoever posted the event.</p>
+        <p>The container is disposable (<code>--rm</code>) precisely because none of the state lives in it: the repo and the sessions are bind mounts on the host.</p>
+
+        <div class="callout warn">
+          <span class="tag">the paths must be identical inside and out</span>
+          <p>Every path is mounted at its <em>own</em> absolute path, and <code>-w</code> points at that same path. This is load-bearing, not tidiness. Callers locate a run's transcripts by slugifying the workdir string, and free-code's session id <em>is</em> an absolute <code>.jsonl</code> path that gets fed back to <code>--session</code>. Mount the repo at <code>/workspace</code> instead and nothing errors — the artifacts simply land somewhere nobody is watching, and a long-running job looks stalled forever. If you supply your own image, don't bake in a <code>WORKDIR</code> or a <code>HOME</code> that fights this.</p>
+        </div>
+        <div class="callout warn">
+          <span class="tag">mounts come from the hook, never from the payload</span>
+          <p>The sandbox code never reads a <code>WebhookEvent</code>. The hook is operator-configured; the body is whatever an HTTP caller posted, and deriving a mount from it would turn a webhook into arbitrary host filesystem access. For the same reason, don't mount <code>/var/run/docker.sock</code> into an agent image: that socket is root on the host, and handing it to a <code>bypassPermissions</code> agent gives back everything the container was for.</p>
+        </div>
+        <div class="callout warn">
+          <span class="tag">what the sandbox does not contain</span>
+          <p>Mounting <code>~/.claude</code> brings <code>.credentials.json</code> with it, so an agent inside the container can still read the harness credentials — the container bounds what it reaches on your <em>filesystem</em>, not what it can do with your login. Only the <code>sessions/</code> subdirectory of the bridge dir is mounted, deliberately: the bridge dir itself holds <code>hooks.json</code>, i.e. every hook's shared secret, which the agent has no business reading.</p>
+        </div>
       </section>
 
       <section id="command-reference">

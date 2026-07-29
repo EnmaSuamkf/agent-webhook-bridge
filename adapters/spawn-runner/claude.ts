@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { logsDir } from "../../broker/config.ts";
 import type { HookConfig } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
+import { wrapForSandbox } from "./sandbox.ts";
 import { renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 /** Alias kept so external callers that imported the old name keep compiling. */
@@ -46,11 +47,18 @@ export function runClaude(hook: HookConfig, event: WebhookEvent, onSpawn?: Spawn
 	fs.mkdirSync(logsDir(), { recursive: true });
 	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
 
-	if (hook.visible) return runVisible(args, BINARY, cwd, mode, logFile, onSpawn, onStarted);
+	// Last step before spawning: a hook with a `sandbox` block gets this exact
+	// argv re-expressed as `docker run --rm … claude …`; without one the pair
+	// comes back untouched. The `cwd` is deliberately NOT rewritten — the run
+	// still starts from the host workdir, which is where the flock, the log
+	// file and (via the identical bind-mount path) the transcripts live.
+	const run = wrapForSandbox(BINARY, args, hook);
+
+	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted);
 
 	// Hidden mode: Node owns the log file directly, so the header is written
 	// here up front (there's no terminal shell to print its own).
 	const logStream = fs.createWriteStream(logFile, { flags: "a" });
-	logStream.write(`$ ${BINARY} ${args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-	return runHidden(args, BINARY, cwd, mode, logFile, logStream, onSpawn, onStarted);
+	logStream.write(`$ ${run.binary} ${run.args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
+	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted);
 }
