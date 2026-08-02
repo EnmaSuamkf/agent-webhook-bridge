@@ -11,7 +11,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node broker/daemon.ts"
+    "start": "node broker/daemon.ts",
+    "test": "node --test"
   },
   "devDependencies": {
     "@types/node": "^26.1.0"
