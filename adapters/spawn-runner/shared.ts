@@ -34,12 +34,32 @@ export interface RunResult {
 	 * the terminal via `tee`, not through this process) and on spawn errors.
 	 */
 	stdout?: string;
+	/**
+	 * Captured stderr of the spawned run (tail only, see MAX_STDERR_CAPTURE).
+	 *
+	 * This is where a CLI says WHY it died — "Prompt is too long", a bad flag, a
+	 * missing credential — and until it was captured here none of that reached
+	 * the caller: `dispatch.callbackPayload` only ever forwarded `ok`/`exitCode`,
+	 * so every failure, including a context overflow, arrived at the hub as a
+	 * bare `exit 1`. Still piped to the log file exactly as before; this is a
+	 * copy, not a redirect. Absent in visible mode (stderr goes through `tee` in
+	 * the terminal, not through this process) and on spawn errors.
+	 */
+	stderr?: string;
 }
 
 // Callback payloads only need the result JSON (a few KB); cap the in-memory
 // capture so a runaway run can't balloon the broker's heap. The log file
 // still gets everything regardless.
 const MAX_STDOUT_CAPTURE = 4 * 1024 * 1024;
+
+/**
+ * stderr is only ever used as an error message, so a much smaller cap than
+ * stdout's — and it's the TAIL that's kept, not the head: a CLI prints its
+ * progress chatter first and its fatal error last, so the last 8KB is the part
+ * that says what went wrong.
+ */
+const MAX_STDERR_CAPTURE = 8 * 1024;
 
 /**
  * `flock` (util-linux) binary, located once at module load. Hidden runs wrap
@@ -183,17 +203,34 @@ export function runHidden(
 			stdoutChunks.push(chunk);
 			stdoutSize += chunk.length;
 		});
+		// Keep a rolling tail of stderr: append, then drop from the front once over
+		// the cap, so a chatty run that dies at the end still yields its last words
+		// without the broker holding the whole stream.
+		const stderrChunks: Buffer[] = [];
+		let stderrSize = 0;
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderrChunks.push(chunk);
+			stderrSize += chunk.length;
+			while (stderrSize > MAX_STDERR_CAPTURE && stderrChunks.length > 1) {
+				stderrSize -= (stderrChunks.shift() as Buffer).length;
+			}
+		});
 		child.stdout?.pipe(logStream, { end: false });
 		child.stderr?.pipe(logStream, { end: false });
 		child.on("close", (exitCode) => {
 			logStream.end();
 			const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-			resolve({ ok: exitCode === 0, mode, exitCode, logFile, stdout });
+			const stderr = Buffer.concat(stderrChunks).toString("utf8");
+			resolve({ ok: exitCode === 0, mode, exitCode, logFile, stdout, stderr });
 		});
 		child.on("error", (err) => {
-			logStream.write(`\nspawn error: ${String(err)}\n`);
+			const message = `spawn error: ${String(err)}`;
+			logStream.write(`\n${message}\n`);
 			logStream.end();
-			resolve({ ok: false, mode, exitCode: null, logFile });
+			// The spawn never produced a stream, so this IS the run's error text —
+			// report it as stderr rather than leaving the caller with a null exit code
+			// and no explanation.
+			resolve({ ok: false, mode, exitCode: null, logFile, stderr: message });
 		});
 	});
 }

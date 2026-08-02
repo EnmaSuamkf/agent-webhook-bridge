@@ -55,6 +55,39 @@ function jobIdFrom(event: WebhookEvent): string | null {
 }
 
 /**
+ * How much of the CLI's error text to forward. Enough for a real message
+ * ("Prompt is too long: 412345 tokens > 200000 maximum" and a stack, say),
+ * short enough that a callback body stays a callback body — the full text is in
+ * the run log either way, and the log file path travels with every failure.
+ */
+const MAX_ERROR_CHARS = 4000;
+
+/**
+ * The run's error text, or undefined when it succeeded / said nothing.
+ *
+ * Order matters: a CLI that emits a structured `{"error": …}` on stdout has
+ * already told us precisely what went wrong, so that wins; otherwise it's the
+ * tail of stderr, which is where every CLI here prints its fatal message. The
+ * exit code is deliberately NOT synthesised into a message — the hub already
+ * falls back to `exit N` when there's no error, and inventing "exit 1" here
+ * would just move that string one layer down while still saying nothing.
+ */
+function errorText(run: RunResult): string | undefined {
+	if (run.ok) return undefined;
+	if (run.stdout) {
+		try {
+			const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+			const structured = parsed.error;
+			if (typeof structured === "string" && structured.trim()) return structured.trim().slice(0, MAX_ERROR_CHARS);
+		} catch {
+			// Not JSON — stderr below is the better source anyway.
+		}
+	}
+	const stderr = run.stderr?.trim();
+	return stderr ? stderr.slice(-MAX_ERROR_CHARS) : undefined;
+}
+
+/**
  * Shapes what gets POSTed to `callbackUrl`. Each adapter's `stdout` is a JSON
  * object with `result` and `session_id` — claude's `--output-format json`
  * envelope natively, free-code's NDJSON stream reshaped by its adapter into
@@ -62,9 +95,22 @@ function jobIdFrom(event: WebhookEvent): string | null {
  * isn't parseable JSON (visible mode logs a `text` transcript through `tee`,
  * so there's no stdout here at all), the caller still gets `ok`/`exitCode`
  * and can fall back to the broker log.
+ *
+ * A FAILED run also carries `error`: the CLI's own words about why it died.
+ * Without it every failure — a bad flag, a missing credential, a context
+ * overflow on a conversation that grew too long — reached the caller as a bare
+ * `exit 1`, which is the least diagnosable thing a failure can say. `logFile`
+ * rides along on a failure too, so the caller can point at the full output.
+ *
+ * Exported for the tests: this shape is the contract between the broker and
+ * every async caller, and "does a failure carry its error text" is exactly the
+ * kind of thing that silently regresses.
  */
-function callbackPayload(run: RunResult): Record<string, unknown> {
+export function callbackPayload(run: RunResult): Record<string, unknown> {
 	const payload: Record<string, unknown> = { ok: run.ok, exitCode: run.exitCode, mode: run.mode };
+	const error = errorText(run);
+	if (error !== undefined) payload.error = error;
+	if (!run.ok) payload.logFile = run.logFile;
 	if (!run.stdout) return payload;
 	try {
 		const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
