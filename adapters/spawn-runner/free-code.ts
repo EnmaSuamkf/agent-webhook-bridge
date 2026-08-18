@@ -30,15 +30,17 @@
  *       bypass/auto/dontAsk → full incl. bash (dangerous, same risk as claude)
  *       manual/plan        → read-only (a spawned run has no TTY to confirm)
  *
- * - Subagents: delegation lives in a shipped *extension*, not in the core tool
- *   table, so `--no-extensions` (which we keep, to ignore anything the
- *   untrusted workdir plants) silently removes it. See
- *   `subagentExtensionArgs` — we load that one extension back by absolute
- *   path.
+ * - Discovery: the run loads free-code's full environment — extensions
+ *   (subagents, MCP, profile manager, …), skills, prompt templates and
+ *   themes are auto-discovered from `~/.free-code` and the workdir, exactly
+ *   like running free-code by hand in that directory. `~/.free-code` is
+ *   mounted at its own absolute path in the docker sandbox, so discovery
+ *   sees the same files on both sides. The single exception is the RAG
+ *   server: `--no-rag-server` stays, because the sandbox image has no Python
+ *   RAG server and its auto-start otherwise blocks startup for ~90s.
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { bridgeDir, logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
@@ -49,48 +51,6 @@ const BINARY = "free-code";
 
 /** Root directory the adapter stores free-code session .jsonl files under. */
 const SESSIONS_BASE = path.join(bridgeDir(), "sessions");
-
-/**
- * free-code's global extensions directory. free-code's own migrations copy the
- * bundled `default-extensions/` here on first start, so this is where the
- * shipped extensions live for both a host run and a sandboxed one (sandbox.ts
- * mounts `~/.free-code` at its own absolute path, so the two agree).
- */
-const AGENT_EXTENSIONS_DIR = path.join(os.homedir(), ".free-code", "agent", "extensions");
-
-/**
- * The bundled extension that registers `subagent_create` / `subagent_continue`
- * / `subagent_list` / `subagent_remove` — i.e. the ONLY way a free-code run
- * can delegate work to a subagent. Those tools are extension tools, not core
- * ones: `--tools` validates its argument against free-code's built-in tool
- * table (read, bash, edit, write, grep, find, ls, code_*) and hard-errors with
- * `Unknown tool "…"` on anything else, so no `--tools` value can turn
- * delegation on.
- *
- * We keep `--no-extensions` (it is what stops free-code from discovering — and
- * executing — a `.free-code/agent/extensions/` planted in the untrusted
- * workdir) and lean on its documented escape hatch: "explicit -e paths still
- * work". So exactly one operator-chosen extension is loaded, by absolute path,
- * from the harness's own state dir rather than from job input.
- *
- * Loading it for every `permissionMode` doesn't widen the tool grant: the
- * child free-code the extension spawns is started with the parent's *active
- * built-in* tools (`--tools <inherited>`) plus `--no-extensions`, so a
- * read-only parent can only ever spawn a read-only child.
- *
- * Returns `[]` when the file isn't there (free-code not installed / a
- * different layout) — a missing `-e` path is only a startup diagnostic, but
- * there's no reason to emit one.
- */
-export function subagentExtensionArgs(extensionsDir: string = AGENT_EXTENSIONS_DIR): string[] {
-	const file = path.join(extensionsDir, "subagent-widget.ts");
-	try {
-		if (!fs.existsSync(file)) return [];
-	} catch {
-		return [];
-	}
-	return ["-e", file];
-}
 
 /** Maps the hook's claude-style `permissionMode` to free-code `--tools` flags. */
 export function toolsArgs(permissionMode: PermissionMode | undefined): string[] {
@@ -112,6 +72,34 @@ export function toolsArgs(permissionMode: PermissionMode | undefined): string[] 
 			// claude would prompt; a spawned run has no TTY, so read-only it is.
 			return ["--tools", "read,grep,find,ls"];
 	}
+}
+
+/**
+ * The argv `runFreeCode` spawns free-code with (after the binary). Extracted
+ * so tests can pin the flag list directly.
+ *
+ * The run loads free-code's full environment — extensions (the subagent
+ * widget included, so delegation just works), skills, prompt templates and
+ * themes are auto-discovered from `~/.free-code` and the workdir, the same
+ * as running free-code by hand there. sandbox.ts mounts `~/.free-code` at
+ * its own absolute path, so discovery sees the same files inside the docker
+ * sandbox as on the host.
+ *
+ * The one exclusion is `--no-rag-server`: the sandbox image has no Python
+ * RAG server and its auto-start otherwise blocks startup for ~90s, and the
+ * spawned runs don't use it.
+ */
+export function spawnArgs(prompt: string, outputMode: "text" | "json", sessionFile: string, permissionMode: PermissionMode | undefined): string[] {
+	return [
+		"-p",
+		prompt,
+		"--mode",
+		outputMode,
+		"--session",
+		sessionFile,
+		...toolsArgs(permissionMode),
+		"--no-rag-server",
+	];
 }
 
 /**
@@ -197,26 +185,7 @@ export function runFreeCode(hook: HookConfig, event: WebhookEvent, onSpawn?: Spa
 	// readable before the window closes). Hidden runs use `json` so we can
 	// parse the result back out of stdout.
 	const outputMode = hook.visible ? "text" : "json";
-	const args = [
-		"-p",
-		prompt,
-		"--mode",
-		outputMode,
-		"--session",
-		sessionFile,
-		...toolsArgs(hook.permissionMode),
-		// The sandbox workdir isn't a real repo and its contents are untrusted
-		// job input — don't let free-code discover skills/extensions/themes or
-		// auto-start the RAG server from it.
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-themes",
-		"--no-rag-server",
-		// …but re-add, by absolute path, the one shipped extension that gives
-		// the agent its subagent tools, so a spawned run can delegate.
-		...subagentExtensionArgs(),
-	];
+	const args = spawnArgs(prompt, outputMode, sessionFile, hook.permissionMode);
 
 	const cwd = hook.workdir ?? process.cwd();
 	fs.mkdirSync(logsDir(), { recursive: true });
