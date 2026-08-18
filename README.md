@@ -543,9 +543,10 @@ to get the result back, `--visible` for a live terminal window. The only differe
   (See [New session vs. resuming](#new-session-vs-resuming-sessionid).)
 - **`--permission-mode` is mapped to `--tools`**, not forwarded as a flag (free-code has no
   `--permission-mode`). See the table in [Permissions in headless mode](#permissions-in-headless-mode).
-- The adapter passes `--no-extensions --no-skills --no-prompt-templates --no-themes --no-rag-server`
-  so a sandbox workdir with untrusted job input can't make free-code discover and run code from
-  local skills/extensions it finds there.
+- The adapter passes only `--no-rag-server` (the sandbox image has no RAG server, and its
+  auto-start would otherwise block startup for ~90s). Everything else is discovered exactly like a
+  hand-run free-code in that directory: extensions (the subagent widget included), skills, prompt
+  templates and themes load from `~/.free-code` and the workdir.
 
 This is the runtime the AgentMesh concept paper had in mind for the single-operator bridge, and
 it's what the demo agent in [`PLAN.md §4.3`](PLAN.md) maps to once you swap `--runner claude` for
