@@ -12,6 +12,7 @@
  * SQLite remain the source of truth if it fails.
  */
 import { runClaude } from "../adapters/spawn-runner/claude.ts";
+import { runCursor } from "../adapters/spawn-runner/cursor.ts";
 import { runFreeCode } from "../adapters/spawn-runner/free-code.ts";
 import type { RunResult } from "../adapters/spawn-runner/shared.ts";
 import type { SpawnHook, StartedHook } from "../adapters/spawn-runner/shared.ts";
@@ -184,13 +185,14 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 	for (const consumer of hook.consumers) {
 		const id = insertEvent(event, consumer);
 
-		if (consumer === "spawn:claude" || consumer === "spawn:free-code") {
+		if (consumer === "spawn:claude" || consumer === "spawn:free-code" || consumer === "spawn:cursor") {
 			const key = hook.workdir ?? "default";
 			const callbackUrl = loopbackUrlFrom(event, "callbackUrl", log);
 			const startedUrl = loopbackUrlFrom(event, "startedCallbackUrl", log);
 			const jobId = jobIdFrom(event);
-			const runner = consumer === "spawn:free-code" ? runFreeCode : runClaude;
-			const tag = consumer === "spawn:free-code" ? "free-code" : "claude";
+			const runner =
+				consumer === "spawn:free-code" ? runFreeCode : consumer === "spawn:cursor" ? runCursor : runClaude;
+			const tag = consumer === "spawn:free-code" ? "free-code" : consumer === "spawn:cursor" ? "cursor" : "claude";
 			// Register the spawned process group leader so an external abort
 			// (`POST /hook/:name/abort {jobId}`) can kill the whole group — flock,
 			// the bash shim, and the agent binary — which is what actually frees

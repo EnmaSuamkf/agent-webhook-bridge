@@ -68,6 +68,10 @@ export function hostUser(): string {
  *    that path has to resolve inside the container too. Only the sessions
  *    subdirectory: the bridge dir itself holds `hooks.json`, i.e. every hook's
  *    shared secret, which the agent has no business reading.
+ *  - `~/.cursor` — Cursor Agent's config, credentials, chat databases and
+ *    MCP settings. Sessions resume by uuid scoped to `--workspace`, so the
+ *    chats tree has to be visible at the same absolute path inside the
+ *    container.
  *
  * The list is not conditioned on which harness the hook runs: a claude sandbox
  * already gets the free-code sessions dir, and a free-code sandbox already gets
@@ -83,6 +87,7 @@ export function harnessStateMounts(): string[] {
 		path.join(os.homedir(), ".claude"),
 		path.join(os.homedir(), ".claude.json"),
 		path.join(os.homedir(), ".free-code"),
+		path.join(os.homedir(), ".cursor"),
 		path.join(bridgeDir(), "sessions"),
 	].filter((p) => {
 		try {
