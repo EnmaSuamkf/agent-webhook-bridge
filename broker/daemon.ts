@@ -3,6 +3,8 @@
  * Broker daemon entry point. Run directly (`node broker/daemon.ts`) or via
  * `awb start`; stays alive listening for webhook POSTs and dispatching them.
  */
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.ts";
 import { dispatch } from "./dispatch.ts";
 import { createServer } from "./server.ts";
@@ -35,6 +37,6 @@ export function startBroker(): void {
 	});
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
 	startBroker();
 }
