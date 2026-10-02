@@ -33,7 +33,21 @@ const DOCKER = "docker";
 export interface SandboxedCommand {
 	binary: string;
 	args: string[];
+	/**
+	 * Variables to set in the environment of the spawned process itself (the
+	 * `docker` CLI), for every `sandbox.env` entry written `NAME=value`. The
+	 * argv carries only `-e NAME`, so docker copies the value from its own
+	 * environment into the container: the value is absent from `ps`, from
+	 * `/proc/<pid>/cmdline` and from the `$ docker run …` header in the run log.
+	 * Callers must hand this to the spawn (`runHidden`/`runVisible`'s `extraEnv`)
+	 * or the container simply never sees the variable. Absent when no entry
+	 * carries a value.
+	 */
+	env?: Record<string, string>;
 }
+
+/** A POSIX-ish env var name; anything else in `sandbox.env` is dropped rather than passed to docker. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * `uid:gid` of the broker process, so files the agent writes into the
@@ -83,10 +97,12 @@ export function hostUser(): string {
  *    Optional for correctness (the CLI recreates it) but cheap to share.
  *
  * Copilot auth is NOT a mount: the host login lives in the OS keyring, which a
- * container cannot reach. A copilot docker hook passes a token by name through
- * the hook-level `sandbox.env`, e.g. `"env": ["COPILOT_GITHUB_TOKEN"]`; the
- * value is taken from the broker's environment (never stored in hooks.json or
- * argv). The container also needs the writable `$HOME` set below.
+ * container cannot reach. A copilot docker hook passes a token through the
+ * hook-level `sandbox.env`: `"COPILOT_GITHUB_TOKEN"` forwards the broker's own
+ * value, `"COPILOT_GITHUB_TOKEN=<value>"` sets one outright (the hub writes
+ * that form, which is why hooks.json is saved with mode 0600). Either way the
+ * value never reaches argv: see `dockerRunSpec`. The container also needs the
+ * writable `$HOME` set below.
  *
  * The list is not conditioned on which harness the hook runs: a claude sandbox
  * already gets the free-code sessions dir, and a free-code sandbox already gets
@@ -118,12 +134,23 @@ export function harnessStateMounts(): string[] {
 
 /**
  * The `docker run …` argv (everything up to and including the image) for a
- * run of `binary` in `workdir`. Exported so callers that need to show an
- * equivalent command — e.g. a "resume this session in a terminal" button —
- * can build one that really works, instead of a hand-written approximation
- * that drifts from what the broker actually runs.
+ * run of `binary` in `workdir`, plus the environment the docker CLI process
+ * must be spawned with. Exported so callers that need to show an equivalent
+ * command — e.g. a "resume this session in a terminal" button — can build one
+ * that really works, instead of a hand-written approximation that drifts from
+ * what the broker actually runs.
+ *
+ * `sandbox.env` entries: `NAME` becomes `-e NAME` (docker forwards the
+ * broker's own value); `NAME=value` ALSO becomes just `-e NAME`, and the value
+ * is returned in `env` for the caller to put in the docker client's
+ * environment — never in argv, where `ps` and the run log header would show
+ * it. Entries whose NAME is not a valid variable name are skipped.
  */
-export function dockerRunArgs(sandbox: NonNullable<HookConfig["sandbox"]>, workdir: string, extraFlags: string[] = []): string[] {
+export function dockerRunSpec(
+	sandbox: NonNullable<HookConfig["sandbox"]>,
+	workdir: string,
+	extraFlags: string[] = [],
+): { args: string[]; env?: Record<string, string> } {
 	const args = ["run", "--rm"];
 	// PID 1 that reaps zombies and, crucially, forwards the SIGTERM the docker
 	// client proxies on abort down to the agent CLI — without it the signal
@@ -145,11 +172,23 @@ export function dockerRunArgs(sandbox: NonNullable<HookConfig["sandbox"]>, workd
 	// resolves `~/.claude` from — point it at the host home whose `.claude` we
 	// just mounted, or the container writes its state somewhere nobody reads.
 	args.push("-e", `HOME=${os.homedir()}`);
-	for (const entry of sandbox.env ?? []) args.push("-e", entry);
+	const env: Record<string, string> = {};
+	for (const entry of sandbox.env ?? []) {
+		const eq = entry.indexOf("=");
+		const name = eq === -1 ? entry : entry.slice(0, eq);
+		if (!ENV_NAME.test(name)) continue;
+		args.push("-e", name);
+		if (eq !== -1) env[name] = entry.slice(eq + 1);
+	}
 
 	args.push("-w", workdir);
 	args.push(sandbox.image);
-	return args;
+	return Object.keys(env).length > 0 ? { args, env } : { args };
+}
+
+/** Argv-only view of `dockerRunSpec` (see there for how `NAME=value` entries are handled). */
+export function dockerRunArgs(sandbox: NonNullable<HookConfig["sandbox"]>, workdir: string, extraFlags: string[] = []): string[] {
+	return dockerRunSpec(sandbox, workdir, extraFlags).args;
 }
 
 /**
@@ -166,5 +205,6 @@ export function wrapForSandbox(binary: string, args: string[], hook: HookConfig)
 	const sandbox = hook.sandbox;
 	if (!sandbox || sandbox.kind !== "docker") return { binary, args };
 	const workdir = path.resolve(hook.workdir ?? process.cwd());
-	return { binary: DOCKER, args: [...dockerRunArgs(sandbox, workdir), binary, ...args] };
+	const spec = dockerRunSpec(sandbox, workdir);
+	return { binary: DOCKER, args: [...spec.args, binary, ...args], ...(spec.env ? { env: spec.env } : {}) };
 }

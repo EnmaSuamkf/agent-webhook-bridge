@@ -131,7 +131,10 @@ test("user, resource limits, extra mounts and env are taken from the hook", () =
 	assert.equal(run.args[run.args.indexOf("--pids-limit") + 1], "64");
 	assert.ok(run.args.includes("/opt/toolchain:/opt/toolchain"));
 	assert.ok(run.args.includes("ANTHROPIC_API_KEY"));
-	assert.ok(run.args.includes("AWB_TAG=demo"));
+	// `NAME=value` moves out of argv into the docker client's environment.
+	assert.ok(run.args.includes("AWB_TAG"));
+	assert.ok(!run.args.includes("AWB_TAG=demo"));
+	assert.deepEqual(run.env, { AWB_TAG: "demo" });
 });
 
 test("harnessStateMounts picks up the harness home and the sessions dir once they exist, and skips what doesn't", () => {
@@ -209,4 +212,31 @@ test("copilot state (~/.copilot, ~/.cache/copilot) is mounted at the same path o
 		fs.rmSync(path.join(tmpHome, ".copilot"), { recursive: true, force: true });
 		fs.rmSync(path.join(tmpHome, ".cache"), { recursive: true, force: true });
 	}
+});
+
+test("`NAME=value` env entries never put the value in argv: `-e NAME` plus a separate env map", () => {
+	const secret = "gho_dummyDummyDummyDummyDummyDummy1234";
+	const run = wrapForSandbox("copilot", ["-p", "hi"], hook({ sandbox: { kind: "docker", image: "img", env: [`COPILOT_GITHUB_TOKEN=${secret}`, "WITH_EQ=a=b"] } }));
+	assert.deepEqual(run.env, { COPILOT_GITHUB_TOKEN: secret, WITH_EQ: "a=b" });
+	assert.ok(run.args.some((a, i) => a === "COPILOT_GITHUB_TOKEN" && run.args[i - 1] === "-e"));
+	assert.ok(!run.args.some((a) => a.includes(secret)));
+	assert.ok(!run.args.some((a) => a.includes("a=b")));
+});
+
+test("a plain `NAME` entry still forwards the broker's value and yields no env map", () => {
+	const run = wrapForSandbox("claude", [], hook({ sandbox: { kind: "docker", image: "img", env: ["FOO"] } }));
+	assert.ok(run.args.some((a, i) => a === "FOO" && run.args[i - 1] === "-e"));
+	assert.equal(run.env, undefined);
+});
+
+test("env entries with an invalid NAME are skipped, value included", () => {
+	const run = wrapForSandbox("claude", [], hook({ sandbox: { kind: "docker", image: "img", env: ["1BAD=secretsecretsecret", "bad-name=x", "=x", "", "has space"] } }));
+	assert.equal(run.env, undefined);
+	assert.ok(!run.args.some((a) => a.includes("secretsecretsecret") || a.includes("bad-name") || a === "has space"));
+	assert.equal(run.args.filter((a) => a === "-e").length, 1, "only the HOME entry remains");
+});
+
+test("a hook without sandbox.env or a sandbox has no env on the command", () => {
+	assert.equal(wrapForSandbox("claude", [], hook({ sandbox: { kind: "docker", image: "img" } })).env, undefined);
+	assert.equal(wrapForSandbox("claude", [], hook()).env, undefined);
 });

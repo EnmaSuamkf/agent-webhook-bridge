@@ -37,7 +37,7 @@ import * as path from "node:path";
 import { logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 import { wrapForSandbox } from "./sandbox.ts";
-import { renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
+import { commandHeader, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 const BINARY = "agent";
 
@@ -92,12 +92,12 @@ export function warmupMcps(hook: HookConfig, workdir: string, logStream: fs.Writ
 
 	const run = wrapForSandbox(BINARY, warmupArgs(workdir), hook);
 	logStream.write(`# MCP warm-up (new session, step stays queued until the real run starts)\n`);
-	logStream.write(`$ ${run.binary} ${run.args.join(" ")}\ncwd: ${workdir}\n\n`);
+	logStream.write(`${commandHeader(run.binary, run.args)}\ncwd: ${workdir}\n\n`);
 
 	return new Promise((resolve) => {
 		let child: ChildProcess;
 		try {
-			child = _impl.spawn(run.binary, run.args, { cwd: workdir, stdio: ["ignore", "pipe", "pipe"] });
+			child = _impl.spawn(run.binary, run.args, { cwd: workdir, stdio: ["ignore", "pipe", "pipe"], ...(run.env ? { env: { ...process.env, ...run.env } } : {}) });
 		} catch {
 			logStream.write("\n# MCP warm-up: spawn failed — continuing with the real run\n\n");
 			resolve();
@@ -170,15 +170,15 @@ export async function runCursor(
 
 	const run = wrapForSandbox(BINARY, args, hook);
 
-	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted);
+	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted, run.env);
 
 	const logStream = fs.createWriteStream(logFile, { flags: "a" });
 	// Warm-up runs before `runHidden`, which is what fires `onStarted` — so the
 	// hub step stays `queued` until MCPs have had a chance to connect.
 	if (mode === "new") await warmupMcps(hook, cwd, logStream);
 
-	logStream.write(`$ ${run.binary} ${run.args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted).then((result) => {
+	logStream.write(`${commandHeader(run.binary, run.args, (a) => (a === prompt ? JSON.stringify(a) : a))}\ncwd: ${cwd}\n\n`);
+	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted, run.env).then((result) => {
 		if (result.stdout !== undefined) {
 			try {
 				result.stdout = buildEnvelope(result.stdout);

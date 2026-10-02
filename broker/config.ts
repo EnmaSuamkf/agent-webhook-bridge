@@ -39,7 +39,7 @@ export interface DockerSandbox {
 	image: string;
 	/** `--user` value. Defaults to the broker's own uid:gid, so files the agent creates in the workdir are owned by the operator, not root. */
 	user?: string;
-	/** Extra environment: `"NAME"` forwards the broker's own value, `"NAME=value"` sets one outright. */
+	/** Extra environment: `"NAME"` forwards the broker's own value, `"NAME=value"` sets one outright (passed via the docker client's environment, never argv). */
 	env?: string[];
 	/** Extra host paths to bind-mount, each at its own absolute path. Every entry is a hole in the sandbox — the workdir and harness state are mounted already. */
 	mounts?: string[];
@@ -155,5 +155,9 @@ export function loadConfig(): BridgeConfig {
 export function saveConfig(cfg: BridgeConfig): void {
 	const file = configFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+	// 0600: `sandbox.env` may carry `NAME=value` secrets (and every hook has its
+	// shared secret). `mode` only applies when the file is created, so chmod
+	// too, to tighten a hooks.json written before this by an older version.
+	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+	fs.chmodSync(file, 0o600);
 }
