@@ -43,7 +43,7 @@ import * as path from "node:path";
 import { logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 import { wrapForSandbox } from "./sandbox.ts";
-import { renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
+import { commandHeader, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 const BINARY = "copilot";
 
@@ -159,11 +159,11 @@ export async function runCopilot(
 
 	const run = wrapForSandbox(BINARY, args, hook);
 
-	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted);
+	if (hook.visible) return runVisible(run.args, run.binary, cwd, mode, logFile, onSpawn, onStarted, run.env);
 
 	const logStream = fs.createWriteStream(logFile, { flags: "a" });
-	logStream.write(`$ ${run.binary} ${run.args.map((a) => (a === prompt ? JSON.stringify(a) : a)).join(" ")}\ncwd: ${cwd}\n\n`);
-	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted).then((result) => {
+	logStream.write(`${commandHeader(run.binary, run.args, (a) => (a === prompt ? JSON.stringify(a) : a))}\ncwd: ${cwd}\n\n`);
+	return runHidden(run.args, run.binary, cwd, mode, logFile, logStream, onSpawn, onStarted, run.env).then((result) => {
 		if (result.stdout !== undefined) result.stdout = buildEnvelope(result.stdout);
 		return result;
 	});

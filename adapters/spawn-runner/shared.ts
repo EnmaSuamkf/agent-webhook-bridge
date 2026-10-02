@@ -131,6 +131,24 @@ export function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
 	return template.replaceAll("{{payload}}", payload).replaceAll("{{hook}}", event.hook);
 }
 
+/**
+ * `$ <binary> <args…>` line for a run log. The sandbox keeps `NAME=value` env
+ * entries out of argv (see sandbox.ts), so nothing should need hiding here;
+ * this is the defensive backstop: any `-e NAME=<20+ chars>` that still turns
+ * up has its value replaced with `***`, so a secret can't reach the log
+ * through a future code path that forgets the rule. `HOME=/home/x`-sized
+ * values stay readable.
+ *
+ * `shown` lets the caller substitute an element for display (the adapters
+ * JSON-quote the prompt so multi-line prompts stay on one line).
+ */
+export function commandHeader(binary: string, args: string[], shown: (arg: string) => string = (a) => a): string {
+	const safe = args.map((a, i) =>
+		args[i - 1] === "-e" && /^[A-Za-z_][A-Za-z0-9_]*=.{20,}/s.test(a) ? `${a.slice(0, a.indexOf("="))}=***` : shown(a),
+	);
+	return `$ ${binary} ${safe.join(" ")}`;
+}
+
 /** Notified once the spawned process group leader exists (its pid), so dispatch can register it for abort. */
 export type SpawnHook = (pid: number) => void;
 
@@ -163,8 +181,10 @@ export function runHidden(
 	logStream: fs.WriteStream,
 	onSpawn?: SpawnHook,
 	onStarted?: StartedHook,
+	extraEnv?: Record<string, string>,
 ): Promise<RunResult> {
 	return new Promise((resolve) => {
+		const env = { ...process.env, ...extraEnv };
 		const useFlock = FLOCK !== null;
 		const lockfile = useFlock ? lockFileFor(cwd) : null;
 		// fd layout when wrapped: 0 ignore, 1 stdout (binary), 2 stderr (binary),
@@ -173,10 +193,11 @@ export function runHidden(
 		const child = useFlock
 			? spawn(FLOCK as string, [lockfile as string, "bash", "-c", HIDDEN_STARTED_SCRIPT, "bash", binary, ...args], {
 					cwd,
+					env,
 					stdio,
 					detached: true,
 				})
-			: spawn(binary, args, { cwd, stdio, detached: true });
+			: spawn(binary, args, { cwd, env, stdio, detached: true });
 		onSpawn?.(child.pid as number);
 
 		if (useFlock) {
@@ -279,6 +300,7 @@ export function runVisible(
 	logFile: string,
 	onSpawn?: SpawnHook,
 	onStarted?: StartedHook,
+	extraEnv?: Record<string, string>,
 ): Promise<RunResult> {
 	return new Promise((resolve) => {
 		const child = spawn(
@@ -294,7 +316,7 @@ export function runVisible(
 				binary,
 				...args,
 			],
-			{ cwd, env: { ...process.env, AWB_LOGFILE: logFile }, stdio: "ignore", detached: true },
+			{ cwd, env: { ...process.env, ...extraEnv, AWB_LOGFILE: logFile }, stdio: "ignore", detached: true },
 		);
 		onSpawn?.(child.pid as number);
 		// Best-effort: visible mode has no fd-3 channel back, so report start at
@@ -307,8 +329,8 @@ export function runVisible(
 		child.on("error", (err) => {
 			const logStream = fs.createWriteStream(logFile, { flags: "a" });
 			logStream.write(`gnome-terminal unavailable (${String(err)}), falling back to hidden run\n`);
-			logStream.write(`$ ${binary} ${args.join(" ")}\ncwd: ${cwd}\n\n`);
-			runHidden(args, binary, cwd, mode, logFile, logStream, onSpawn, onStarted).then(resolve);
+			logStream.write(`${commandHeader(binary, args)}\ncwd: ${cwd}\n\n`);
+			runHidden(args, binary, cwd, mode, logFile, logStream, onSpawn, onStarted, extraEnv).then(resolve);
 		});
 	});
 }

@@ -244,10 +244,15 @@ POST /hook/<name>
   an `ok: true` callback does not prove nothing was blocked.
 - **A resumed session keeps the cwd it was created in.**
 - **Docker sandbox**: the host login lives in the OS keyring, which a container cannot reach, so
-  pass a token by *name* in the hook's `sandbox.env` and export it in the broker's environment:
-  `"sandbox": {"kind": "docker", "image": "...", "env": ["COPILOT_GITHUB_TOKEN"]}`. `~/.copilot`
-  (sessions, logs, config) and `~/.cache/copilot` (the ~185 MB bundled CLI) are mounted at the same
-  absolute paths when they exist.
+  pass a token through the hook's `sandbox.env`. Two forms: `"COPILOT_GITHUB_TOKEN"` forwards the
+  broker's own value (export it in the broker's environment); `"COPILOT_GITHUB_TOKEN=<value>"`
+  sets the value outright, so nothing has to be exported. In both cases `docker run` gets only
+  `-e COPILOT_GITHUB_TOKEN`; a `NAME=value` value goes into the environment of the `docker` client
+  process alone, so it is absent from `ps`, `/proc/<pid>/cmdline` and the `$ docker run …` header of
+  the run log. Entries with an invalid variable name are skipped. Because hooks.json can now hold
+  such a secret, it is written with mode `600`, and `awb list`/`awb add` print env names only.
+  `~/.copilot` (sessions, logs, config) and `~/.cache/copilot` (the ~185 MB bundled CLI) are
+  mounted at the same absolute paths when they exist.
 
 ```bash
 awb add cp-worker --runner copilot --permission-mode acceptEdits --workdir ~/some-repo

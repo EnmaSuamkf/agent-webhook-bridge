@@ -92,6 +92,8 @@ function describeHook(name: string, hook: HookConfig, cfg: BridgeConfig): string
 		hook.hmacSecret ? "HMAC:       X-Signature: sha256=<hmac-sha256(hmacSecret, rawBody)>" : "",
 		hook.workdir ? `Workdir:    ${hook.workdir}` : "",
 		hook.permissionMode ? `Permission: ${hook.permissionMode}` : "",
+		// Names only: a `NAME=value` entry holds a secret that must not echo to a terminal or scrollback.
+		hook.sandbox?.env?.length ? `Sandbox env: ${hook.sandbox.env.map((e) => e.split("=")[0]).join(", ")}` : "",
 		hook.visible ? "Visible:    yes (gnome-terminal)" : "",
 		hook.promptTemplate ? `Prompt:     ${hook.promptTemplate}` : "",
 	]
