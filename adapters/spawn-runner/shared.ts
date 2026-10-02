@@ -1,11 +1,11 @@
 /**
- * Shared spawn plumbing for the spawn-runner adapters (claude, free-code, …).
+ * Shared spawn plumbing for the spawn-runner adapters (claude, free-code, cursor, copilot).
  *
  * Each adapter builds its own argv (binary + flags) and hands it here to run
  * it either hidden (stdout piped to a log file and captured in memory) or in
  * a visible gnome-terminal window. Adapters keep their result-parsing /
  * session-handling specifics; this module only owns the process lifecycle,
- * the log file, and the visible/hidden fallback — so the two adapters don't
+ * the log file, and the visible/hidden fallback — so the spawn adapters don't
  * drift apart on the parts that are identical between CLIs.
  */
 import { spawn } from "node:child_process";
@@ -18,8 +18,8 @@ import type { WebhookEvent } from "../../broker/types.ts";
 /**
  * Common shape every spawn adapter returns. `dispatch.callbackPayload` lifts
  * `result`/`session_id` out of `stdout` uniformly, so adapters whose CLI
- * emits a different stream (free-code's NDJSON, not claude's single JSON
- * envelope) reshape their stdout into a `{result, session_id}` object before
+ * emits a different stream (free-code's NDJSON or copilot's JSONL, not
+ * claude's single JSON envelope) reshape their stdout into a `{result, session_id}` object before
  * returning — the broker/hub side then stays adapter-agnostic.
  */
 export interface RunResult {
@@ -92,8 +92,12 @@ const FLOCK = ["/usr/bin/flock", "/bin/flock", "/usr/local/bin/flock"].find((p) 
  */
 const STARTED_MARKER = "AWB_STARTED\n";
 
-/** `echo <marker> >&3; exec 3>&-; exec "$@"` — print the marker, close fd 3, replace with the agent binary. */
-const HIDDEN_STARTED_SCRIPT = `echo ${STARTED_MARKER.trim()} >&3 2>/dev/null; exec 3>&- 2>/dev/null; exec "$@"`;
+/**
+ * `echo <marker> >&3; exec 3>&-; exec "$@"` — print the marker, close fd 3, replace with the agent binary.
+ * No redirection of stderr on the `exec`s: on a bare `exec` it is permanent and would send the
+ * agent's own stderr (its error message) to /dev/null.
+ */
+const HIDDEN_STARTED_SCRIPT = `echo ${STARTED_MARKER.trim()} >&3 2>/dev/null; exec 3>&-; exec "$@"`;
 
 /**
  * Persistent workdir lock file for `cwd`. Kept OUTSIDE the workdir (under

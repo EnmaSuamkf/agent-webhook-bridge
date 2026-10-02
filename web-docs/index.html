@@ -357,6 +357,35 @@ Investigate the cause.</code></pre>
           <p>free-code's <code>--mode json</code> is not a single envelope the way claude's <code>--output-format json</code> is: it emits an NDJSON event stream (a session header line, then one event per message/turn/tool). The adapter consumes that stream and reshapes it into the same <code>{result, session_id}</code> envelope the claude adapter produces, so the callback body and the AgentMesh hub see one uniform shape from either runtime.</p>
         </div>
 
+        <h3><code>--runner copilot</code></h3>
+        <p><a href="https://docs.github.com/copilot/concepts/agents/about-copilot-cli">GitHub Copilot CLI</a> (<code>copilot</code>) is the fourth runner (<code>--runner copilot</code>, or <code>--consumer spawn:copilot</code>). It resumes by a <strong>bare uuid</strong>, like claude; the <code>session_id</code> in the callback is that uuid.</p>
+        <div class="diagram">POST /hook/&lt;name&gt;
+  <span class="hl">sessionId</span> header present?
+    │
+    ├─ no  → copilot -p "&lt;prompt&gt;" --output-format json --stream off --no-auto-update --no-color
+    │          --no-ask-user --session-id=&lt;fresh uuid&gt; &lt;permission flags&gt;
+    │
+    └─ yes → copilot -p "&lt;prompt&gt;" ... --resume=&lt;sessionId header value&gt; &lt;permission flags&gt;
+             (an unknown id exits 1 with "No session, task, or name matched ..." on stderr)</div>
+        <ul>
+          <li><strong>Output</strong>: <code>--output-format json</code> prints JSONL. The final answer is the last <code>assistant.message</code> with no tool requests and non-empty content (not the closing <code>result</code> line); the adapter reshapes it into the usual <code>{result, session_id}</code> envelope. With no <code>result</code> line stdout is left untouched so error forwarding keeps working.</li>
+          <li><strong>Permissions</strong>: Copilot has no <code>--permission-mode</code>, so it is mapped to tool flags passed on every call (resumed ones too). Nothing can answer a prompt in <code>-p</code>: unapproved tool calls are denied at once.
+            <table>
+              <thead><tr><th><code>--permission-mode</code></th><th>Copilot flags</th><th>Effect</th></tr></thead>
+              <tbody>
+                <tr><td>unset, <code>manual</code>, <code>plan</code></td><td><code>--available-tools=view,grep,glob --deny-tool=write --deny-tool=shell</code></td><td>read-only</td></tr>
+                <tr><td><code>acceptEdits</code></td><td><code>--allow-tool=write --deny-tool=shell</code></td><td>edits yes, shell no</td></tr>
+                <tr><td><code>auto</code>, <code>dontAsk</code></td><td><code>--allow-all-tools</code></td><td>all tools, workdir + <code>/tmp</code> paths</td></tr>
+                <tr><td><code>bypassPermissions</code></td><td><code>--allow-all</code></td><td>everything</td></tr>
+              </tbody>
+            </table>
+          </li>
+          <li>Copilot exits <strong>0 even when a tool call was denied</strong> (<code>error.code: "denied"</code> in the log), so an <code>ok: true</code> callback does not prove nothing was blocked.</li>
+          <li>A resumed session keeps the cwd it was created in.</li>
+          <li><strong>Docker sandbox</strong>: the host login lives in the OS keyring, which a container cannot reach. Pass a token by <em>name</em> in <code>sandbox.env</code> and export it in the broker's environment: <code>"env": ["COPILOT_GITHUB_TOKEN"]</code>. <code>~/.copilot</code> and <code>~/.cache/copilot</code> are mounted at the same absolute paths when they exist.</li>
+        </ul>
+        <pre><code>awb add cp-worker --runner copilot --permission-mode acceptEdits --workdir ~/some-repo</code></pre>
+
         <h3>Where do I get the <code>sessionId</code> I need to send?</h3>
         <p>
           The broker and Claude don't invent it: it's the <strong>caller</strong> (your script,
@@ -645,7 +674,7 @@ awb events ci-failures</code></pre>
         <p>This is phase 1 of the roadmap (see <code>PLAN.md</code> at the repo root): broker + spawn adapter.</p>
         <ul>
           <li><code>queue</code> mode persists events in SQLite, but there's no MCP adapter yet (<code>poll_events</code>/<code>wait_for_event</code>) to read them from a session — that's phase 2.</li>
-          <li>Cursor and Codex CLI aren't supported yet in the spawn adapter — Claude Code and free-code only.</li>
+          <li>Codex CLI isn't supported yet in the spawn adapter — Claude Code, free-code, Cursor and GitHub Copilot CLI are.</li>
           <li>There's no <code>systemd</code>/<code>launchd</code> unit or installer: <code>awb start</code> runs in the foreground and you have to supervise it yourself (or with <code>pm2</code>, <code>tmux</code>, etc.) if you want it to survive a reboot.</li>
         </ul>
       </section>

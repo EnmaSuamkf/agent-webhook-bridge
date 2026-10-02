@@ -71,7 +71,7 @@ export interface HookConfig {
 	secret?: string;
 	/** Secret used to verify an HMAC-SHA256 signature of the raw body (X-Signature: sha256=<hex>). */
 	hmacSecret?: string;
-	/** Output adapters that consume this hook's events, e.g. ["spawn:claude"], ["queue"]. */
+	/** Output adapters that consume this hook's events, e.g. ["spawn:claude"], ["queue"]; spawn:<claude|free-code|cursor|copilot>. */
 	consumers: string[];
 	/** Template for prompts sent to spawned agents. {{payload}} and {{hook}} are interpolated. */
 	promptTemplate?: string;
@@ -81,7 +81,10 @@ export interface HookConfig {
 	 * Passed through as claude's `--permission-mode`. Headless runs (no TTY) can't
 	 * answer a permission prompt, so without this any Write/Edit/Bash the model
 	 * attempts is auto-denied. Unset by default — opt in per hook once you trust
-	 * what that hook's prompt asks the agent to do.
+	 * what that hook's prompt asks the agent to do. Each non-claude adapter maps
+	 * it to its own flags; copilot: unset/manual/plan = read-only,
+	 * acceptEdits = edits but no shell, auto/dontAsk = --allow-all-tools (cwd +
+	 * /tmp), bypassPermissions = --allow-all.
 	 */
 	permissionMode?: PermissionMode;
 	/**
