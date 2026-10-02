@@ -26,13 +26,15 @@ Commands:
   start                                  Run the broker (foreground)
   add <name> [options]                   Register a hook
     --trigger | --queue                  Delivery mode (default: trigger)
-    --runner <claude|free-code>          Which CLI to spawn for trigger hooks (default: claude).
-                                          Shortcut for --consumer spawn:claude|spawn:free-code.
+    --runner <claude|free-code|cursor|copilot>
+                                          Which CLI to spawn for trigger hooks (default: claude).
+                                          Shortcut for --consumer spawn:<runner>.
                                           The free-code adapter maps --permission-mode to its
                                           --tools flag set (see below) and resumes sessions by
                                           .jsonl path instead of a claude session uuid.
     --consumer <c>                       Repeatable; default spawn:claude for trigger, queue otherwise.
-                                          Use spawn:free-code to wake free-code instead of claude.
+                                          spawn:<runner> (claude, free-code, cursor, copilot) picks
+                                          the CLI to wake.
     --prompt-template <text>             Prompt template for spawned agents ({{payload}}, {{hook}})
     --workdir <dir>                      cwd for spawned agent processes
     --secret <s> | --hmac-secret <s>     Auth secret (random shared secret generated if omitted)
@@ -43,7 +45,10 @@ Commands:
                                           For --runner free-code this is mapped to --tools:
                                           unset→read,grep,find,ls; acceptEdits→+edit,write;
                                           bypass/auto/dontAsk→+bash; manual/plan→read-only.
-    --visible                            Run the spawned agent (claude or free-code) in a visible
+                                          For --runner copilot: unset/manual/plan→read-only;
+                                          acceptEdits→edits, no shell; auto/dontAsk→all tools
+                                          (cwd + /tmp); bypassPermissions→--allow-all.
+    --visible                            Run the spawned agent (claude, free-code, cursor or copilot) in a visible
                                           gnome-terminal window (streams live, closes when done)
                                           instead of hidden. Falls back to hidden if
                                           gnome-terminal isn't installed.
@@ -54,8 +59,9 @@ Commands:
   test <name> [--body <json>] [--session-id <id>]
                                           POST a local test event to the running broker
                                           (with --session-id, the spawn:claude adapter resumes
-                                          that claude session and the spawn:free-code adapter
-                                          resumes the .jsonl path it points at)
+                                          that claude session, spawn:free-code resumes the
+                                          .jsonl path it points at, spawn:cursor/spawn:copilot
+                                          resume the session uuid)
 `);
 }
 
@@ -141,7 +147,7 @@ async function main(): Promise<void> {
 		const permissionMode = permissionModeArg as PermissionMode | undefined;
 		const visible = rest.includes("--visible");
 		const runnerArg = flagValue(rest, "--runner");
-		const VALID_RUNNERS = ["claude", "free-code"] as const;
+		const VALID_RUNNERS = ["claude", "free-code", "cursor", "copilot"] as const;
 		if (runnerArg && !VALID_RUNNERS.includes(runnerArg as (typeof VALID_RUNNERS)[number])) {
 			console.error(`Invalid --runner '${runnerArg}'. Choices: ${VALID_RUNNERS.join(", ")}`);
 			process.exitCode = 1;
@@ -153,7 +159,7 @@ async function main(): Promise<void> {
 		// consumer for the chosen runner (default claude). It has no effect on
 		// --queue hooks, whose default consumer stays "queue".
 		const defaultConsumers =
-			mode === "trigger" ? (runner === "free-code" ? ["spawn:free-code"] : ["spawn:claude"]) : ["queue"];
+			mode === "trigger" ? [`spawn:${runner ?? "claude"}`] : ["queue"];
 
 		const hook: HookConfig = {
 			mode,

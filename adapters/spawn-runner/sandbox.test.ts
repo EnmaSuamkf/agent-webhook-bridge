@@ -182,3 +182,31 @@ test("dockerRunArgs ends at the image and accepts extra flags (e.g. -it for an i
 	assert.equal(args.at(-1), "img");
 	assert.ok(args.includes("-it"));
 });
+
+test("copilot state (~/.copilot, ~/.cache/copilot) is mounted at the same path once it exists, and a copilot argv follows the image", () => {
+	const dot = path.join(tmpHome, ".copilot");
+	const cache = path.join(tmpHome, ".cache", "copilot");
+	assert.ok(!harnessStateMounts().includes(dot));
+	fs.mkdirSync(dot, { recursive: true });
+	fs.mkdirSync(cache, { recursive: true });
+	try {
+		assert.ok(harnessStateMounts().includes(dot));
+		assert.ok(harnessStateMounts().includes(cache));
+		const run = wrapForSandbox(
+			"copilot",
+			["-p", "hi", "--output-format", "json"],
+			hook({ sandbox: { kind: "docker", image: "img", env: ["COPILOT_GITHUB_TOKEN"] } }),
+		);
+		assert.equal(run.args[0], "run");
+		assert.ok(run.args.includes(`${dot}:${dot}`));
+		assert.ok(run.args.includes(`${cache}:${cache}`));
+		assert.equal(run.args[run.args.indexOf("-w") + 1], WORKDIR);
+		// the token is forwarded by NAME only; its value never enters the argv
+		assert.ok(run.args.includes("COPILOT_GITHUB_TOKEN"));
+		const tail = run.args.slice(run.args.indexOf("img"));
+		assert.deepEqual(tail, ["img", "copilot", "-p", "hi", "--output-format", "json"]);
+	} finally {
+		fs.rmSync(path.join(tmpHome, ".copilot"), { recursive: true, force: true });
+		fs.rmSync(path.join(tmpHome, ".cache"), { recursive: true, force: true });
+	}
+});

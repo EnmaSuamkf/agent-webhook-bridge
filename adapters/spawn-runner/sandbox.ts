@@ -74,6 +74,19 @@ export function hostUser(): string {
  *  - `~/.config/cursor` — Cursor Agent CLI OAuth tokens (`auth.json`). The CLI
  *    stores login state here (not under `~/.cursor`), so mounting only the
  *    latter leaves docker runs failing with "Authentication required".
+ *  - `~/.copilot` — Copilot CLI's session-state (`session-state/<uuid>/`
+ *    with `events.jsonl`), logs, config and session store, all written at run
+ *    time. A resumed session is looked up by id under this tree, so it has to
+ *    be the same absolute path inside the container; read-write.
+ *  - `~/.cache/copilot` — the CLI extracts a ~185 MB bundled package here on
+ *    every start; mounting it avoids re-extracting on each docker run.
+ *    Optional for correctness (the CLI recreates it) but cheap to share.
+ *
+ * Copilot auth is NOT a mount: the host login lives in the OS keyring, which a
+ * container cannot reach. A copilot docker hook passes a token by name through
+ * the hook-level `sandbox.env`, e.g. `"env": ["COPILOT_GITHUB_TOKEN"]`; the
+ * value is taken from the broker's environment (never stored in hooks.json or
+ * argv). The container also needs the writable `$HOME` set below.
  *
  * The list is not conditioned on which harness the hook runs: a claude sandbox
  * already gets the free-code sessions dir, and a free-code sandbox already gets
@@ -91,6 +104,8 @@ export function harnessStateMounts(): string[] {
 		path.join(os.homedir(), ".free-code"),
 		path.join(os.homedir(), ".cursor"),
 		path.join(os.homedir(), ".config", "cursor"),
+		path.join(os.homedir(), ".copilot"),
+		path.join(os.homedir(), ".cache", "copilot"),
 		path.join(bridgeDir(), "sessions"),
 	].filter((p) => {
 		try {

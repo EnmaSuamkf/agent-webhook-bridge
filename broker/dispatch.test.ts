@@ -82,3 +82,18 @@ test("a run that failed after producing output keeps both the result and the err
 	assert.equal(payload.session_id, "sess-2", "the hub needs this to keep the workflow on one conversation");
 	assert.equal(payload.error, "killed");
 });
+
+test("a copilot run: the envelope's result/session_id are lifted, and a failed --resume carries its stderr as error", () => {
+	const ok = callbackPayload(
+		run({ stdout: JSON.stringify({ result: "pong", session_id: "6f1c2f0e-3b7a-4c55-9a39-0d6c1e8b7a42" }) }),
+	);
+	assert.equal(ok.result, "pong");
+	assert.equal(ok.session_id, "6f1c2f0e-3b7a-4c55-9a39-0d6c1e8b7a42");
+
+	// A failed --resume exits 1 with an empty stdout; stderr says why.
+	const failed = callbackPayload(
+		run({ ok: false, exitCode: 1, stdout: "", stderr: "No session, task, or name matched 'deadbeef'\n" }),
+	);
+	assert.equal(failed.ok, false);
+	assert.equal(failed.error, "No session, task, or name matched 'deadbeef'");
+});

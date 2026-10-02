@@ -206,6 +206,53 @@ arbitrary caller-supplied path.
 > `{result, session_id}` envelope the claude adapter produces, so the callback body and the
 > AgentMesh hub see one uniform shape from either runtime.
 
+### `--runner copilot`
+
+[GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli) (`copilot`) is
+the fourth runner (`--runner copilot`, or `--consumer spawn:copilot`). It resumes by a **bare uuid**,
+like claude; the `session_id` in the callback is that uuid:
+
+```
+POST /hook/<name>
+  sessionId header present?
+    │
+    ├─ no  → copilot -p "<prompt>" --output-format json --stream off --no-auto-update --no-color
+    │          --no-ask-user --session-id=<fresh uuid> <permission flags>
+    │
+    └─ yes → copilot -p "<prompt>" ... --resume=<sessionId header value> <permission flags>
+             (an unknown id exits 1 with "No session, task, or name matched ..." on stderr: it
+              fails loudly instead of silently starting a new session)
+```
+
+- **Output**: `--output-format json` prints JSONL. The final answer is not in the closing
+  `{"type":"result"}` line but in the last `assistant.message` that has no tool requests and
+  non-empty content; the adapter reshapes the stream into the usual `{result, session_id}` envelope.
+  If there is no `result` line (crash, auth failure, unknown session) stdout is left as is so the
+  error forwarding keeps working.
+- **Permissions**: Copilot has no `--permission-mode`; the adapter maps it to tool flags and passes
+  them on every call, resumed ones too (they are not stored in the session). In `-p` nothing can
+  answer a prompt, so an unapproved tool call is denied at once, never a hang.
+
+  | `--permission-mode` | Copilot flags | Effect |
+  |---|---|---|
+  | unset, `manual`, `plan` | `--available-tools=view,grep,glob --deny-tool=write --deny-tool=shell` | read-only |
+  | `acceptEdits` | `--allow-tool=write --deny-tool=shell` | edits yes, shell no |
+  | `auto`, `dontAsk` | `--allow-all-tools` | all tools, paths limited to the workdir + `/tmp` |
+  | `bypassPermissions` | `--allow-all` | everything (tools, any path, any URL) |
+
+  Copilot exits **0 even when a tool call was denied** (see `error.code: "denied"` in the log), so
+  an `ok: true` callback does not prove nothing was blocked.
+- **A resumed session keeps the cwd it was created in.**
+- **Docker sandbox**: the host login lives in the OS keyring, which a container cannot reach, so
+  pass a token by *name* in the hook's `sandbox.env` and export it in the broker's environment:
+  `"sandbox": {"kind": "docker", "image": "...", "env": ["COPILOT_GITHUB_TOKEN"]}`. `~/.copilot`
+  (sessions, logs, config) and `~/.cache/copilot` (the ~185 MB bundled CLI) are mounted at the same
+  absolute paths when they exist.
+
+```bash
+awb add cp-worker --runner copilot --permission-mode acceptEdits --workdir ~/some-repo
+```
+
 ### Where do I get the `sessionId` I need to send?
 
 The broker and Claude don't invent it: it's the **caller** (your script, your Flowise flow, your
@@ -513,7 +560,7 @@ This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapte
 
 - `queue` mode persists events in SQLite, but there's no MCP adapter yet (`poll_events`/
   `wait_for_event`) to read them from a session — that's phase 2.
-- Cursor and Codex CLI aren't supported yet in the spawn adapter — Claude Code and free-code only.
+- Codex CLI isn't supported yet in the spawn adapter — Claude Code, free-code, Cursor and GitHub Copilot CLI are.
 - There's no `systemd`/`launchd` unit or installer: `awb start` runs in the foreground and you
   have to supervise it yourself (or with `pm2`, `tmux`, etc.) if you want it to survive a reboot.
 

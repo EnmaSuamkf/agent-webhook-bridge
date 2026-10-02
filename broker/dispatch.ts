@@ -1,8 +1,9 @@
 /**
  * Routes a verified webhook event to its configured consumers and records
- * delivery state in SQLite. `spawn:claude` runs are serialized per working
- * directory (PLAN.md section 8 risk: "no pisar" two agent runs on the same
- * repo) so two events never spawn concurrent Claude sessions on one workdir.
+ * delivery state in SQLite. `spawn:*` runs (every spawn adapter: claude,
+ * free-code, cursor, copilot) are serialized per working directory (PLAN.md
+ * section 8 risk: "no pisar" two agent runs on the same repo) so two events
+ * never spawn concurrent agent sessions on one workdir.
  *
  * Result callback: if the event body carries a `callbackUrl`, the run's
  * outcome is POSTed there when the spawn finishes, so async callers (e.g. an
@@ -12,6 +13,7 @@
  * SQLite remain the source of truth if it fails.
  */
 import { runClaude } from "../adapters/spawn-runner/claude.ts";
+import { runCopilot } from "../adapters/spawn-runner/copilot.ts";
 import { runCursor } from "../adapters/spawn-runner/cursor.ts";
 import { runFreeCode } from "../adapters/spawn-runner/free-code.ts";
 import type { RunResult } from "../adapters/spawn-runner/shared.ts";
@@ -181,18 +183,25 @@ function runExclusive(key: string, task: () => Promise<void>): void {
 	});
 }
 
+/** Spawn consumers: `spawn:<tag>` -> the adapter that runs it. Adding a runner is one line. */
+const SPAWN_RUNNERS: Record<string, { tag: string; run: typeof runClaude }> = {
+	"spawn:claude": { tag: "claude", run: runClaude },
+	"spawn:free-code": { tag: "free-code", run: runFreeCode },
+	"spawn:cursor": { tag: "cursor", run: runCursor },
+	"spawn:copilot": { tag: "copilot", run: runCopilot },
+};
+
 export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, log: Logger): void {
 	for (const consumer of hook.consumers) {
 		const id = insertEvent(event, consumer);
 
-		if (consumer === "spawn:claude" || consumer === "spawn:free-code" || consumer === "spawn:cursor") {
+		const spawnRunner = SPAWN_RUNNERS[consumer];
+		if (spawnRunner) {
 			const key = hook.workdir ?? "default";
 			const callbackUrl = loopbackUrlFrom(event, "callbackUrl", log);
 			const startedUrl = loopbackUrlFrom(event, "startedCallbackUrl", log);
 			const jobId = jobIdFrom(event);
-			const runner =
-				consumer === "spawn:free-code" ? runFreeCode : consumer === "spawn:cursor" ? runCursor : runClaude;
-			const tag = consumer === "spawn:free-code" ? "free-code" : consumer === "spawn:cursor" ? "cursor" : "claude";
+			const { run: runner, tag } = spawnRunner;
 			// Register the spawned process group leader so an external abort
 			// (`POST /hook/:name/abort {jobId}`) can kill the whole group — flock,
 			// the bash shim, and the agent binary — which is what actually frees
