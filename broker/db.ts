@@ -156,47 +156,92 @@ export function pidAlive(pid: number): boolean {
 	}
 }
 
-const KILL_GRACE_MS = 3000;
+/**
+ * Escalation waits, in order: SIGINT (the Claude CLI stops its turn and flushes
+ * the transcript on it), SIGTERM, SIGKILL. Worst case 2+3+2 = 7s (plus one poll
+ * interval per step), kept under the hub's 15s abort request timeout.
+ */
+const SIGINT_WAIT_MS = 2000;
+const SIGTERM_WAIT_MS = 3000;
+const SIGKILL_WAIT_MS = 2000;
+const KILL_POLL_MS = 100;
 
 function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
+ * Syscall/clock seam for `killRun`, so tests can simulate a group that never
+ * dies (`kill_failed`) with a fake clock instead of waiting out ~7s. Production
+ * uses the real `process.kill`, `setTimeout` and `Date.now`.
+ */
+export interface KillOps {
+	kill(pid: number, signal: NodeJS.Signals | 0): void;
+	wait(ms: number): Promise<void>;
+	now(): number;
+}
+
+const REAL_KILL_OPS: KillOps = { kill: (pid, signal) => process.kill(pid, signal), wait, now: Date.now };
+
+/** Returns whether any process of the group led by `pid` is still alive (never throws). */
+function groupAlive(pid: number, ops: KillOps): boolean {
+	try {
+		ops.kill(-pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+export type KillSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
+
+export interface KillOutcome {
+	/** killed: group signalled and verified gone. not_running: no live run. kill_failed: still alive after SIGKILL + wait. */
+	result: "killed" | "not_running" | "kill_failed";
+	/** The signal that finished the job (the one after which the group was gone), or the last one tried on failure; null if none was sent. */
+	signal: KillSignal | null;
+	/** True only when the process group was verified gone. */
+	exited: boolean;
+}
+
+/**
  * Kills the in-flight run for (hook, job_id) — its whole process group, so the
  * flock wrapper, the bash `-c` shim, AND the spawned agent binary all die
  * together (the binary is what holds the workdir flock, so killing the group
- * is what actually frees the workdir for the next run). SIGTERM first, then
- * SIGKILL after a short grace if the group hasn't exited. Removes the row
- * once dealt with. Returns whether a live run was found (and signalled);
- * false means there was nothing to abort (the run already finished, or its
- * pid was already gone and got reaped).
+ * is what actually frees the workdir for the next run). Escalates SIGINT ->
+ * SIGTERM -> SIGKILL, waiting for the group to vanish after each, and never
+ * reports `killed` unless the group is verified gone (`exited: true`); the run
+ * row is removed only then. If the group survives SIGKILL the row is kept and
+ * the result is `kill_failed`, so the caller can retry or surface it.
  */
-export async function killRun(hook: string, jobId: string): Promise<boolean> {
+export async function killRun(hook: string, jobId: string, ops: KillOps = REAL_KILL_OPS): Promise<KillOutcome> {
 	const run = findRun(hook, jobId);
-	if (!run) return false;
-	const killGroup = (signal: NodeJS.Signals): boolean => {
+	if (!run) return { result: "not_running", signal: null, exited: false };
+	const steps: Array<[KillSignal, number]> = [
+		["SIGINT", SIGINT_WAIT_MS],
+		["SIGTERM", SIGTERM_WAIT_MS],
+		["SIGKILL", SIGKILL_WAIT_MS],
+	];
+	let last: KillSignal | null = null;
+	for (const [signal, waitMs] of steps) {
 		try {
-			process.kill(-run.pid, signal);
-			return true;
+			ops.kill(-run.pid, signal);
 		} catch (err) {
-			// ESRCH = the group is already gone; anything else (EPERM) we surface.
-			return (err as NodeJS.ErrnoException).code === "ESRCH";
+			// ESRCH = the group is already gone; anything else (EPERM) we can't fix, keep escalating/verifying.
+			if ((err as NodeJS.ErrnoException).code === "ESRCH") {
+				unregisterRun(hook, jobId);
+				return { result: "killed", signal: last ?? signal, exited: true };
+			}
 		}
-	};
-	if (!killGroup("SIGTERM")) {
-		unregisterRun(hook, jobId);
-		return true;
-	}
-	// Give the group a moment to exit cleanly on SIGTERM before escalating.
-	const deadline = Date.now() + KILL_GRACE_MS;
-	while (Date.now() < deadline) {
-		await wait(100);
-		if (!pidAlive(run.pid)) {
-			unregisterRun(hook, jobId);
-			return true;
+		last = signal;
+		const deadline = ops.now() + waitMs;
+		while (ops.now() < deadline) {
+			await ops.wait(KILL_POLL_MS);
+			if (!groupAlive(run.pid, ops)) {
+				unregisterRun(hook, jobId);
+				return { result: "killed", signal, exited: true };
+			}
 		}
 	}
-	if (!killGroup("SIGKILL")) unregisterRun(hook, jobId);
-	return true;
+	return { result: "kill_failed", signal: last, exited: !groupAlive(run.pid, ops) };
 }

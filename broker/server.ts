@@ -17,6 +17,7 @@ import * as crypto from "node:crypto";
 import * as http from "node:http";
 import type { BridgeConfig, HookConfig } from "./config.ts";
 import { killRun } from "./db.ts";
+import { cancelQueuedJobs } from "./dispatch.ts";
 import type { WebhookEvent } from "./types.ts";
 
 export interface ServerDeps {
@@ -136,9 +137,23 @@ export function createServer(deps: ServerDeps): http.Server {
 					return;
 				}
 				void (async () => {
-					const killed = await killRun(name, jobId);
-					deps.log(`hook '${name}': abort jobId='${jobId}' → ${killed ? "killed" : "no live run"}`);
-					sendJson(res, 200, { ok: true, killed });
+					// Flag queued/not-yet-spawned jobs first so a spawn racing the kill
+					// below dies in its post-onSpawn check instead of surviving.
+					const flagged = cancelQueuedJobs(name, jobId);
+					const outcome = await killRun(name, jobId);
+					const result =
+						outcome.result === "not_running" && flagged > 0 ? "cancelled_queued" : outcome.result;
+					const killed = result === "killed" || result === "cancelled_queued";
+					deps.log(
+						`hook '${name}': abort jobId='${jobId}' → ${result} (signal=${outcome.signal}, exited=${outcome.exited}, flagged=${flagged})`,
+						result === "kill_failed" ? "error" : "info",
+					);
+					sendJson(res, 200, {
+						result,
+						killed,
+						signal: outcome.signal,
+						exited: outcome.exited,
+					});
 				})();
 			});
 			req.on("error", () => {
