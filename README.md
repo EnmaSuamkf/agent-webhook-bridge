@@ -360,17 +360,10 @@ back to an unwrapped run (same as before this feature).
 
 If the caller tags each event with a `jobId` (any string), the broker records
 the spawned process-group leader pid keyed by `(hook, jobId)` in its SQLite
-DB. `POST /hook/<name>/abort` with the hook's auth and body `{"jobId":"…"}`
-then SIGTERMs (then SIGKILLs after a 3s grace) the whole process group —
+DB. `POST /hook/<name>/abort` with the hook's auth (same secret / HMAC as event
+delivery) and body `{"jobId":"…"}` then stops the whole process group —
 `flock`, the bash shim, and the agent binary — which is what actually frees the
-workdir lock for the next run. The response is `{"ok":true,"killed":<bool>}`:
-`killed:false` means there was no live run for that jobId (it already finished,
-or never existed) — not an error, since a racing completion makes that normal.
-Rows are reaped when the run finishes or when a lookup finds the pid already
-dead, so the table doesn't grow unbounded. Persisting the pid (not keeping it
-in memory) means a **broker restart** can still abort a run the previous
-broker instance spawned. Plain `curl` callers without a `jobId` simply aren't
-abortable by id — everything else is unaffected.
+workdir lock for the next run.
 
 ```bash
 curl -X POST http://127.0.0.1:8890/hook/mesh-worker/abort \
@@ -378,6 +371,60 @@ curl -X POST http://127.0.0.1:8890/hook/mesh-worker/abort \
   -H "X-Webhook-Secret: <secret>" \
   -d '{"jobId":"job-001"}'
 ```
+
+The response is always HTTP 200 (a wrong secret is still 401, a missing
+`jobId` 400, an unknown hook 404) with:
+
+```json
+{ "result": "killed", "killed": true, "signal": "SIGINT", "exited": true }
+```
+
+| `result` | Meaning | `killed` | `signal` | `exited` |
+|---|---|---|---|---|
+| `killed` | A live process group was signalled and **verified gone**. | `true` | the signal after which it exited | `true` |
+| `cancelled_queued` | The job had not spawned yet (queued behind another run on the same workdir, or aborted in the instant between dispatch and spawn). It will never spawn, and no callback is posted for it. | `true` | `null` | `false` |
+| `not_running` | Nothing queued and no live run for that `jobId` (it already finished, or never existed). Not an error — a racing completion makes this normal. | `false` | `null` | `false` |
+| `kill_failed` | The group was still alive after the full SIGINT → SIGTERM → SIGKILL escalation and a final check. The run row is kept, so the abort can be retried. | `false` | `"SIGKILL"` | `false` |
+
+`killed` is kept for backward compatibility with callers that only read the old
+boolean: it is `true` for `killed` and `cancelled_queued`, `false` otherwise.
+(The old `ok` field is gone.) `exited` is the field to trust when you need
+proof the process is dead.
+
+**Escalation.** The group is sent `SIGINT` first — the Claude CLI handles it
+gracefully (stops the turn and flushes its transcript) — and given up to 2s to
+exit; then `SIGTERM` with up to 3s; then `SIGKILL` with up to 2s. After each
+signal the group is polled (every 100ms) and the abort returns as soon as it is
+gone, so a cooperative agent answers in well under a second. Worst case is
+about 7s, so give the abort request a timeout of ~10s or more. `killed` is
+never reported without that check.
+
+**Queued jobs.** Runs on the same `workdir` are serialized, so a job can be
+waiting in the broker's queue with no process (and no pid row) yet. Each
+dispatched job that carries a `jobId` gets its own entry the moment the event
+arrives; an abort flags every not-yet-spawned entry for that `(hook, jobId)`,
+and the job is skipped when its turn comes (its event is marked failed with
+`cancelled`). It is a per-job entry rather than a remembered "cancelled jobId"
+on purpose: callers reuse one `jobId` across retries and re-runs of the same
+step, so a stale marker would cancel a later, legitimate run. A job dispatched
+**after** the abort gets a fresh entry and is unaffected. If the abort lands
+after the queue check but before the process exists, the group is killed as
+soon as its pid is registered.
+
+Rows are reaped when the run finishes or when a lookup finds the pid already
+dead, so the table doesn't grow unbounded. Persisting the pid (not keeping it
+in memory) means a **broker restart** can still abort a run the previous
+broker instance spawned (queued entries are in memory only, so a restart drops
+the queue anyway). Plain `curl` callers without a `jobId` simply aren't
+abortable by id — everything else is unaffected.
+
+> **Limitation — `visible` runs.** Aborting a run started with `--visible` is
+> best-effort. The pid the broker registers is the `gnome-terminal` client's;
+> the real agent process lives under `gnome-terminal-server`, outside that
+> process group, so the escalation may report `killed` for the client while the
+> agent keeps going in its window (close the window to stop it). Docker-sandboxed
+> runs are fine: the group kill reaches the `docker run` client and the
+> container's init process forwards the signal.
 
 ## Permissions in headless mode
 
@@ -565,6 +612,7 @@ This is phase 1 of the roadmap (see [`PLAN.md`](PLAN.md)): broker + spawn adapte
 
 - `queue` mode persists events in SQLite, but there's no MCP adapter yet (`poll_events`/
   `wait_for_event`) to read them from a session — that's phase 2.
+- Aborting a `--visible` run is best-effort (see [Aborting an in-flight run](#aborting-an-in-flight-run-jobid--post-hooknameabort)).
 - Codex CLI isn't supported yet in the spawn adapter — Claude Code, free-code, Cursor and GitHub Copilot CLI are.
 - There's no `systemd`/`launchd` unit or installer: `awb start` runs in the foreground and you
   have to supervise it yourself (or with `pm2`, `tmux`, etc.) if you want it to survive a reboot.

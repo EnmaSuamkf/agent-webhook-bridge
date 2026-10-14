@@ -740,7 +740,7 @@ awb events ci-failures</code></pre>
         </div>
 
         <h3>The broker stays on the host</h3>
-        <p>Only the process boundary around the agent CLI changes. The broker still spawns from the host, still holds the <code>flock</code> on the workdir, still owns the log file under <code>~/.agent-webhook-bridge/logs/</code>, still posts the <code>callbackUrl</code> itself. So a host hook and a docker hook pointed at the same repo still serialize against each other; <code>--init</code> gives the container a PID 1 that forwards the <code>SIGTERM</code> an abort sends, so killing a run still kills what's inside; and the container needs outbound internet for the model API and nothing else — no published port, no <code>--network host</code>, no route back to whoever posted the event.</p>
+        <p>Only the process boundary around the agent CLI changes. The broker still spawns from the host, still holds the <code>flock</code> on the workdir, still owns the log file under <code>~/.agent-webhook-bridge/logs/</code>, still posts the <code>callbackUrl</code> itself. So a host hook and a docker hook pointed at the same repo still serialize against each other; <code>--init</code> gives the container a PID 1 that forwards the signals an abort sends (<code>SIGINT</code>, then <code>SIGTERM</code>, then <code>SIGKILL</code>), so killing a run still kills what's inside; and the container needs outbound internet for the model API and nothing else — no published port, no <code>--network host</code>, no route back to whoever posted the event.</p>
         <p>The container is disposable (<code>--rm</code>) precisely because none of the state lives in it: the repo and the sessions are bind mounts on the host.</p>
 
         <div class="callout warn">

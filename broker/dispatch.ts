@@ -174,6 +174,84 @@ async function postStarted(url: URL, hook: string, log: Logger): Promise<void> {
 
 const workdirChains = new Map<string, Promise<void>>();
 
+/**
+ * One entry per dispatched job that carries a `jobId`, created synchronously
+ * when `dispatch()` receives it — so it exists before the job can possibly
+ * spawn, even while it is still queued behind another run on its workdir.
+ * `POST /hook/:name/abort` flags every entry currently present for
+ * (hook, jobId) via `cancelQueuedJobs`; the job checks its own entry before
+ * spawning and right after `onSpawn`. Entries (not a bare set of jobIds) because
+ * the hub reuses one jobId for the judge phase and every retry of a step: a
+ * stale marker would cancel a future legitimate run, whereas a job dispatched
+ * AFTER the abort gets a fresh entry that nobody flagged. Removed in `finally`.
+ */
+interface JobEntry {
+	cancelled: boolean;
+	started: boolean;
+}
+
+const jobEntries = new Map<string, Set<JobEntry>>();
+
+function entryKey(hook: string, jobId: string): string {
+	return `${hook}\u0000${jobId}`;
+}
+
+function addJobEntry(hook: string, jobId: string): JobEntry {
+	const entry: JobEntry = { cancelled: false, started: false };
+	const key = entryKey(hook, jobId);
+	const set = jobEntries.get(key) ?? new Set<JobEntry>();
+	set.add(entry);
+	jobEntries.set(key, set);
+	return entry;
+}
+
+function removeJobEntry(hook: string, jobId: string, entry: JobEntry): void {
+	const key = entryKey(hook, jobId);
+	const set = jobEntries.get(key);
+	if (!set) return;
+	set.delete(entry);
+	if (set.size === 0) jobEntries.delete(key);
+}
+
+/**
+ * Flags every job currently registered for (hook, jobId) that has not spawned
+ * yet and returns how many it flagged. Those jobs will never spawn (or, if the
+ * abort lands mid-spawn, are killed right after `onSpawn`). Jobs that already
+ * spawned are left alone: their process group is `killRun`'s business, and
+ * flagging them would wrongly suppress the callback of a run that was merely
+ * killed. Returns 0 when nothing is waiting.
+ */
+export function cancelQueuedJobs(hook: string, jobId: string): number {
+	const set = jobEntries.get(entryKey(hook, jobId));
+	if (!set) return 0;
+	let flagged = 0;
+	for (const entry of set) {
+		if (entry.cancelled || entry.started) continue;
+		entry.cancelled = true;
+		flagged++;
+	}
+	return flagged;
+}
+
+/** Grace before the immediate post-spawn kill escalates from SIGTERM to SIGKILL. */
+const CANCEL_KILL_GRACE_MS = 3000;
+
+/** Kills a just-spawned process group of a job that was cancelled mid-spawn: SIGTERM now, SIGKILL after a grace. */
+function killSpawnedGroup(pid: number): void {
+	try {
+		process.kill(-pid, "SIGTERM");
+	} catch {
+		return; // group already gone
+	}
+	setTimeout(() => {
+		try {
+			process.kill(-pid, "SIGKILL");
+		} catch {
+			// already exited
+		}
+	}, CANCEL_KILL_GRACE_MS).unref();
+}
+
 function runExclusive(key: string, task: () => Promise<void>): void {
 	const prev = workdirChains.get(key) ?? Promise.resolve();
 	const next = prev.then(task, task);
@@ -191,11 +269,22 @@ const SPAWN_RUNNERS: Record<string, { tag: string; run: typeof runClaude }> = {
 	"spawn:copilot": { tag: "copilot", run: runCopilot },
 };
 
-export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, log: Logger): void {
+/**
+ * `runners` is a test seam: the abort tests swap in fake runners that spawn
+ * short-lived real processes instead of the agent CLIs. Production callers
+ * never pass it.
+ */
+export function dispatch(
+	name: string,
+	hook: HookConfig,
+	event: WebhookEvent,
+	log: Logger,
+	runners: Record<string, { tag: string; run: typeof runClaude }> = SPAWN_RUNNERS,
+): void {
 	for (const consumer of hook.consumers) {
 		const id = insertEvent(event, consumer);
 
-		const spawnRunner = SPAWN_RUNNERS[consumer];
+		const spawnRunner = runners[consumer];
 		if (spawnRunner) {
 			const key = hook.workdir ?? "default";
 			const callbackUrl = loopbackUrlFrom(event, "callbackUrl", log);
@@ -207,8 +296,15 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 			// the bash shim, and the agent binary — which is what actually frees
 			// the workdir. Only keyed when the caller sent a `jobId` (the hub
 			// always does); otherwise there's nothing to abort by id.
+			const entry = jobId ? addJobEntry(name, jobId) : null;
 			const onSpawn: SpawnHook = (pid) => {
 				if (jobId) registerRun(name, jobId, pid);
+				if (entry) entry.started = true;
+				// Abort landed between dispatch and spawn: the pid now exists, so kill it.
+				if (entry?.cancelled) {
+					log(`'${name}' -> ${tag} job ${jobId} cancelled during spawn, killing pid ${pid}`, "warning");
+					killSpawnedGroup(pid);
+				}
 			};
 			// Fire the `started` callback at the true run start (after the workdir
 			// lock is acquired), so the hub can begin the step's timeout then.
@@ -217,7 +313,18 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 			};
 			runExclusive(key, async () => {
 				try {
+					if (entry?.cancelled) {
+						markFailed(id, "cancelled");
+						log(`'${name}' -> ${tag} job ${jobId} cancelled while queued, not spawned`, "warning");
+						return;
+					}
 					const result = await runner(hook, event, onSpawn, onStarted);
+					if (entry?.cancelled) {
+						// Aborted mid-spawn: the hub already moved on, so no callback.
+						markFailed(id, "cancelled");
+						log(`'${name}' -> ${tag} job ${jobId} cancelled, no callback posted`, "warning");
+						return;
+					}
 					if (result.ok) {
 						markDelivered(id);
 						log(`'${name}' -> ${tag} (${result.mode}) ok, log: ${result.logFile}`);
@@ -229,11 +336,14 @@ export function dispatch(name: string, hook: HookConfig, event: WebhookEvent, lo
 				} catch (err) {
 					markFailed(id, String(err));
 					log(`'${name}' -> ${tag} spawn error: ${String(err)}`, "error");
-					if (callbackUrl) await postCallback(callbackUrl, { ok: false, error: String(err) }, name, log);
+					if (callbackUrl && !entry?.cancelled) await postCallback(callbackUrl, { ok: false, error: String(err) }, name, log);
 				} finally {
 					// The run is done (or died) — drop its row so a later abort for
 					// this jobId is a clean no-op instead of killing a recycled pid.
-					if (jobId) unregisterRun(name, jobId);
+					// A cancelled-before-spawn job never registered a row, and must not
+					// delete the row of a later run that reuses the jobId.
+					if (jobId && entry?.started) unregisterRun(name, jobId);
+					if (jobId && entry) removeJobEntry(name, jobId, entry);
 				}
 			});
 			continue;
