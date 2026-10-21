@@ -132,3 +132,14 @@ test("warmupMcps resolves early when mcp list exits", async () => {
 		_impl.spawn = original;
 	}
 });
+
+test("spawnArgs passes --model as two argv items on new and resumed runs, and omits it when unset or empty", () => {
+	for (const sid of [undefined, "chat-uuid-1"]) {
+		const args = spawnArgs("p", "json", "/repo", sid, "acceptEdits", "gpt-5");
+		assert.equal(args[args.indexOf("--model") + 1], "gpt-5");
+		assert.equal(args.filter((a) => a === "--model").length, 1);
+		assert.equal(args.includes("--force"), true);
+		assert.equal(args.includes("--resume"), sid !== undefined);
+		for (const m of [undefined, ""]) assert.equal(spawnArgs("p", "json", "/repo", sid, "acceptEdits", m).includes("--model"), false);
+	}
+});

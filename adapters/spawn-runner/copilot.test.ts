@@ -209,3 +209,13 @@ test("runCopilot failure: exit 1 with empty stdout stays a failure and stdout is
 		process.env.PATH = origPath;
 	}
 });
+
+test("spawnArgs passes --model as two argv items on new and resumed runs, and omits it when unset or empty", () => {
+	for (const sid of [undefined, SID]) {
+		const args = spawnArgs("p", "/repo", sid, "acceptEdits", "json", "gpt-5.2");
+		assert.equal(args[args.indexOf("--model") + 1], "gpt-5.2");
+		assert.equal(args.filter((a) => a === "--model").length, 1);
+		assert.equal(args.some((a) => a.startsWith(sid ? "--resume=" : "--session-id=")), true);
+		for (const m of [undefined, ""]) assert.equal(spawnArgs("p", "/repo", sid, "acceptEdits", "json", m).includes("--model"), false);
+	}
+});

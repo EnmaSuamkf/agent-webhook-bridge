@@ -88,6 +88,11 @@ export interface HookConfig {
 	 */
 	permissionMode?: PermissionMode;
 	/**
+	 * Model id passed to the spawned CLI as `--model <id>`. Omitted or empty = no
+	 * flag (the CLI's own default). Not validated here; the CLI rejects unknown ids.
+	 */
+	model?: string;
+	/**
 	 * Run spawned claude invocations in a visible gnome-terminal window
 	 * instead of hidden/piped-to-logfile. Streams live (forces
 	 * --output-format text instead of json, which only prints once at the

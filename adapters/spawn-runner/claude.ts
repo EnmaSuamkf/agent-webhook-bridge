@@ -14,15 +14,38 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logsDir } from "../../broker/config.ts";
-import type { HookConfig } from "../../broker/config.ts";
+import type { HookConfig, PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 import { wrapForSandbox } from "./sandbox.ts";
-import { commandHeader, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
+import { commandHeader, modelArgs, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 /** Alias kept so external callers that imported the old name keep compiling. */
 export type ClaudeRunResult = RunResult;
 
 const BINARY = "claude";
+
+/**
+ * The argv `runClaude` spawns `claude` with. Extracted so tests can pin the flag
+ * list directly. A `sessionId` resumes that session; `--model` rides along on
+ * both paths.
+ */
+export function spawnArgs(
+	prompt: string,
+	outputFormat: "text" | "json",
+	sessionId: string | undefined,
+	permissionMode: PermissionMode | undefined,
+	model?: string,
+): string[] {
+	const args = sessionId
+		? ["--resume", sessionId, "-p", prompt, "--output-format", outputFormat]
+		: ["-p", prompt, "--output-format", outputFormat];
+	// Headless runs have no TTY to answer a permission prompt, so any
+	// Write/Edit/Bash the model attempts is auto-denied unless the hook opts
+	// into a permission mode explicitly.
+	if (permissionMode) args.push("--permission-mode", permissionMode);
+	args.push(...modelArgs(model));
+	return args;
+}
 
 export function runClaude(hook: HookConfig, event: WebhookEvent, onSpawn?: SpawnHook, onStarted?: StartedHook): Promise<RunResult> {
 	const prompt = renderPrompt(hook, event);
@@ -35,13 +58,7 @@ export function runClaude(hook: HookConfig, event: WebhookEvent, onSpawn?: Spawn
 	// in runVisible is what actually makes it readable before the window
 	// closes -- neither format streams token-by-token, only stream-json does).
 	const outputFormat = hook.visible ? "text" : "json";
-	const args = sessionId
-		? ["--resume", sessionId, "-p", prompt, "--output-format", outputFormat]
-		: ["-p", prompt, "--output-format", outputFormat];
-	// Headless runs have no TTY to answer a permission prompt, so any
-	// Write/Edit/Bash the model attempts is auto-denied unless the hook opts
-	// into a permission mode explicitly.
-	if (hook.permissionMode) args.push("--permission-mode", hook.permissionMode);
+	const args = spawnArgs(prompt, outputFormat, sessionId, hook.permissionMode, hook.model);
 
 	const cwd = hook.workdir ?? process.cwd();
 	fs.mkdirSync(logsDir(), { recursive: true });

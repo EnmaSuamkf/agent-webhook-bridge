@@ -120,6 +120,11 @@ function lockFileFor(cwd: string): string {
  * not task content — leaving them in {{payload}} makes the spawned agent try
  * to POST them itself or quote them back, and headless runs can't.
  */
+/** `--model <id>` as two argv items when `model` is a non-empty string, else nothing (the CLI's default model). */
+export function modelArgs(model: string | undefined): string[] {
+	return model ? ["--model", model] : [];
+}
+
 export function renderPrompt(hook: HookConfig, event: WebhookEvent): string {
 	let body = event.body;
 	if (typeof body === "object" && body !== null) {

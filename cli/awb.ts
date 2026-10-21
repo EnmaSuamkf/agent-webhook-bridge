@@ -48,6 +48,8 @@ Commands:
                                           For --runner copilot: unset/manual/plan→read-only;
                                           acceptEdits→edits, no shell; auto/dontAsk→all tools
                                           (cwd + /tmp); bypassPermissions→--allow-all.
+    --model <id>                         Model id for spawned runs, passed as --model <id>.
+                                          Unset (or empty) = the CLI's default model.
     --visible                            Run the spawned agent (claude, free-code, cursor or copilot) in a visible
                                           gnome-terminal window (streams live, closes when done)
                                           instead of hidden. Falls back to hidden if
@@ -92,6 +94,7 @@ function describeHook(name: string, hook: HookConfig, cfg: BridgeConfig): string
 		hook.hmacSecret ? "HMAC:       X-Signature: sha256=<hmac-sha256(hmacSecret, rawBody)>" : "",
 		hook.workdir ? `Workdir:    ${hook.workdir}` : "",
 		hook.permissionMode ? `Permission: ${hook.permissionMode}` : "",
+		hook.model ? `Model:      ${hook.model}` : "",
 		// Names only: a `NAME=value` entry holds a secret that must not echo to a terminal or scrollback.
 		hook.sandbox?.env?.length ? `Sandbox env: ${hook.sandbox.env.map((e) => e.split("=")[0]).join(", ")}` : "",
 		hook.visible ? "Visible:    yes (gnome-terminal)" : "",
@@ -147,6 +150,7 @@ async function main(): Promise<void> {
 			return;
 		}
 		const permissionMode = permissionModeArg as PermissionMode | undefined;
+		const model = flagValue(rest, "--model")?.trim();
 		const visible = rest.includes("--visible");
 		const runnerArg = flagValue(rest, "--runner");
 		const VALID_RUNNERS = ["claude", "free-code", "cursor", "copilot"] as const;
@@ -171,6 +175,7 @@ async function main(): Promise<void> {
 			...(promptTemplate ? { promptTemplate } : {}),
 			...(workdir ? { workdir } : {}),
 			...(permissionMode ? { permissionMode } : {}),
+			...(model ? { model } : {}),
 			...(visible ? { visible } : {}),
 		};
 		cfg.hooks[name] = hook;
