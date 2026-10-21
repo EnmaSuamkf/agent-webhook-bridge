@@ -76,3 +76,11 @@ test("permissionMode still grades the built-in tools (the subagent inherits thes
 		assert.deepEqual(tools(mode), ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 	}
 });
+
+test("spawnArgs passes --model as two argv items and omits it when unset or empty", () => {
+	const args = spawnArgs("p", "json", "/s/x.jsonl", "acceptEdits", "some-model");
+	assert.equal(args[args.indexOf("--model") + 1], "some-model");
+	assert.equal(args.filter((a) => a === "--model").length, 1);
+	assert.deepEqual(args.slice(args.indexOf("--session"), args.indexOf("--session") + 2), ["--session", "/s/x.jsonl"]);
+	for (const m of [undefined, ""]) assert.equal(spawnArgs("p", "json", "/s/x.jsonl", "acceptEdits", m).includes("--model"), false);
+});

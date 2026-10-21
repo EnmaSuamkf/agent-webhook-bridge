@@ -45,7 +45,7 @@ import * as path from "node:path";
 import { bridgeDir, logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 import { wrapForSandbox } from "./sandbox.ts";
-import { commandHeader, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
+import { commandHeader, modelArgs, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 const BINARY = "free-code";
 
@@ -89,7 +89,7 @@ export function toolsArgs(permissionMode: PermissionMode | undefined): string[] 
  * RAG server and its auto-start otherwise blocks startup for ~90s, and the
  * spawned runs don't use it.
  */
-export function spawnArgs(prompt: string, outputMode: "text" | "json", sessionFile: string, permissionMode: PermissionMode | undefined): string[] {
+export function spawnArgs(prompt: string, outputMode: "text" | "json", sessionFile: string, permissionMode: PermissionMode | undefined, model?: string): string[] {
 	return [
 		"-p",
 		prompt,
@@ -98,6 +98,7 @@ export function spawnArgs(prompt: string, outputMode: "text" | "json", sessionFi
 		"--session",
 		sessionFile,
 		...toolsArgs(permissionMode),
+		...modelArgs(model),
 		"--no-rag-server",
 	];
 }
@@ -185,7 +186,7 @@ export function runFreeCode(hook: HookConfig, event: WebhookEvent, onSpawn?: Spa
 	// readable before the window closes). Hidden runs use `json` so we can
 	// parse the result back out of stdout.
 	const outputMode = hook.visible ? "text" : "json";
-	const args = spawnArgs(prompt, outputMode, sessionFile, hook.permissionMode);
+	const args = spawnArgs(prompt, outputMode, sessionFile, hook.permissionMode, hook.model);
 
 	const cwd = hook.workdir ?? process.cwd();
 	fs.mkdirSync(logsDir(), { recursive: true });

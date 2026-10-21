@@ -37,7 +37,7 @@ import * as path from "node:path";
 import { logsDir, type HookConfig, type PermissionMode } from "../../broker/config.ts";
 import type { WebhookEvent } from "../../broker/types.ts";
 import { wrapForSandbox } from "./sandbox.ts";
-import { commandHeader, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
+import { commandHeader, modelArgs, renderPrompt, runHidden, runVisible, type RunResult, type SpawnHook, type StartedHook } from "./shared.ts";
 
 const BINARY = "agent";
 
@@ -129,6 +129,7 @@ export function spawnArgs(
 	workdir: string,
 	sessionId: string | undefined,
 	permissionMode: PermissionMode | undefined,
+	model?: string,
 ): string[] {
 	const args = [
 		"-p",
@@ -139,6 +140,7 @@ export function spawnArgs(
 		"--workspace",
 		workdir,
 		...forceArgs(permissionMode),
+		...modelArgs(model),
 	];
 	if (sessionId) args.push("--resume", sessionId);
 	return args;
@@ -163,7 +165,7 @@ export async function runCursor(
 	const mode: "resume" | "new" = sessionId ? "resume" : "new";
 	const outputFormat = hook.visible ? "text" : "json";
 	const cwd = hook.workdir ?? process.cwd();
-	const args = spawnArgs(prompt, outputFormat, cwd, sessionId, hook.permissionMode);
+	const args = spawnArgs(prompt, outputFormat, cwd, sessionId, hook.permissionMode, hook.model);
 
 	fs.mkdirSync(logsDir(), { recursive: true });
 	const logFile = path.join(logsDir(), `${event.hook}-${Date.now()}.log`);
